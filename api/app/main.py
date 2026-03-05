@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import health, tickets
+from app.routes import health, tickets, workflows
 from app.db import create_db_and_tables
 
 app = FastAPI(
@@ -15,3 +15,4 @@ def on_startup():
 
 app.include_router(health.router)
 app.include_router(tickets.router)
+app.include_router(workflows.router)

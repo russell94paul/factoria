@@ -78,3 +78,17 @@ def get_ticket(ticket_id: str, session: Session = Depends(get_session)):
         return {"error": "ticket not found"}
 
     return ticket
+
+@router.get("/{ticket_id}/workflow")
+def get_ticket_workflow(ticket_id: str, session: Session = Depends(get_session)):
+
+    run = session.exec(
+        select(WorkflowRun)
+        .where(WorkflowRun.ticket_id == ticket_id)
+        .order_by(WorkflowRun.started_at.desc())
+    ).first()
+
+    if not run:
+        return {"error": "no workflow run"}
+
+    return {"workflow_run_id": run.workflow_run_id}
