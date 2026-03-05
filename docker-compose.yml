@@ -1,10 +1,24 @@
-version: "3.9"
-
 services:
+
+  openclaw:
+    build: ./gateway/openclaw
+    ports:
+      - "18789:18789"
+    command:
+      [
+        "node",
+        "openclaw.mjs",
+        "gateway",
+        "--bind",
+        "lan",
+        "--allow-unconfigured"
+      ]
+    environment:
+      gateway__controlUi__allowedOrigins: "*"
 
   api:
     build: ./api
     ports:
       - "8000:8000"
-    volumes:
-      - ./workspaces:/workspaces
+    depends_on:
+      - openclaw
