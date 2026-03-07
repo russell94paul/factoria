@@ -7,15 +7,8 @@ from app.services.artifact_service import ArtifactService
 from app.models.agent_session import AgentSession
 from app.models.workflow_run import WorkflowRun
 
+from app.workflows.ticket_to_pr import STATE_AGENT_MAP
 
-STATE_AGENT_MAP = {
-    "TICKET_INTAKE": "IntakeAgent",
-    "DESIGN_REVIEW": "DesignAgent",
-    "PROFILING": "ProfilerAgent",
-    "BUILD": "BuilderAgent",
-    "QA": "QAAgent",
-    "PR_CREATION": "PRAgent",
-}
 
 STATE_ARTIFACT_MAP = {
     "TICKET_INTAKE": "intake.md",
