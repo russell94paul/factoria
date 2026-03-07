@@ -4,3 +4,4 @@ sqlalchemy==2.0.30
 pydantic==2.7.1
 python-multipart==0.0.9
 sqlmodel==0.0.16
+requests

@@ -20,3 +20,7 @@ Thumbs.db
 
 # Docker
 *.log
+
+# Workspace - where tenants live
+workspace/*
+!workspace/.gitkeep

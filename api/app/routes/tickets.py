@@ -8,6 +8,9 @@ from app.models.workflow_event import WorkflowEvent
 from app.schemas.ticket_schema import TicketCreate
 from app.services.workflow_events import append_workflow_event
 
+from app.services.orchestrator import Orchestrator
+from app.services.workspace_manager import WorkspaceManager
+
 router = APIRouter(
     prefix="/tickets",
     tags=["tickets"]
@@ -33,13 +36,26 @@ def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session))
     attempt = len(existing_runs) + 1
 
     workflow = WorkflowRun(
-        ticket_id=new_ticket.ticket_id,
-        attempt=attempt,
-        current_state="TICKET_INTAKE",
+    ticket_id=new_ticket.ticket_id,
+    attempt=attempt,
+    current_state="TICKET_INTAKE",
     )
+
     session.add(workflow)
     session.commit()
     session.refresh(workflow)
+
+    # Create workspace for this run
+    workspace = WorkspaceManager().create_run_workspace(
+        tenant_id="default",
+        ticket_id=workflow.ticket_id,
+        workflow_run_id=workflow.workflow_run_id
+    )
+
+    workflow.workspace_root = str(workspace)
+
+    session.add(workflow)
+    session.commit()
 
     # log the initial state transition as an event
     append_workflow_event(
@@ -52,6 +68,9 @@ def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session))
         to_state="TICKET_INTAKE",
         message="Workflow run started",
     )
+
+    orchestrator = Orchestrator(session)
+    orchestrator.advance(workflow)
 
     return {
         "ticket_id": new_ticket.ticket_id,

@@ -2,11 +2,13 @@ from sqlmodel import Session
 from app.models.workflow_run import WorkflowRun
 from app.services.workflow_events import append_workflow_event
 
+from app.services.agent_runner import AgentRunner
 
 class Orchestrator:
 
     def __init__(self, session: Session):
         self.session = session
+        self.agent_runner = AgentRunner(session)
 
         # State machine registry
         self.handlers = {
@@ -17,9 +19,11 @@ class Orchestrator:
             "QA": self.handle_qa,
         }
 
-    def advance(self, workflow: WorkflowRun):
+    def advance(self, workflow):
 
         state = workflow.current_state
+        # Run agent for current state - added to prevent workflow states from being incorrectly skipped
+        self.agent_runner.run_for_state(workflow)
 
         handler = self.handlers.get(state)
 
@@ -46,6 +50,9 @@ class Orchestrator:
 
         self.session.add(workflow)
         self.session.commit()
+
+        # Run agent for new state
+        self.agent_runner.run_for_state(workflow)
 
         return workflow
 

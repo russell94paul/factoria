@@ -21,3 +21,6 @@ class WorkflowRun(SQLModel, table=True):
 
     started_at: datetime = Field(default_factory=utc_now)
     finished_at: datetime | None = None
+
+    
+    workspace_root: str | None = None

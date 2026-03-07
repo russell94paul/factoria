@@ -15,6 +15,8 @@ services:
       ]
     environment:
       gateway__controlUi__allowedOrigins: "*"
+    volumes:
+     - ./workspace:/workspace
 
   api:
     build: ./api
@@ -22,3 +24,5 @@ services:
       - "8000:8000"
     depends_on:
       - openclaw
+    volumes:
+      - ./workspace:/workspace
