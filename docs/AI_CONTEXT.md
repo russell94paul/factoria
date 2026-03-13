@@ -161,7 +161,7 @@ api/app/services/openclaw_service.py
 The worker calls:
 
 
-AgentRunner.run_for_state()
+AgentRunner.run_task()
 
 
 Responsibilities:

@@ -30,7 +30,7 @@ def worker_loop():
                 workflow = session.get(WorkflowRun, task.workflow_run_id)
 
                 if workflow:
-                    runner.run_for_state(workflow)
+                    runner.run_task(workflow, task.agent_name)
 
                 task.status = "completed"
                 session.add(task)

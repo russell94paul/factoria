@@ -7,7 +7,10 @@ from app.services.artifact_service import ArtifactService
 from app.models.agent_session import AgentSession
 from app.models.workflow_run import WorkflowRun
 
+
 from app.workflows.ticket_to_pr import STATE_AGENT_MAP
+
+AGENT_STATE_MAP = {agent: state for state, agent in STATE_AGENT_MAP.items()}
 
 
 STATE_ARTIFACT_MAP = {
@@ -25,26 +28,20 @@ class AgentRunner:
         self.session = session
         self.client = OpenClawClient()
 
-    def run_for_state(self, workflow_run):
+    def run_task(self, workflow_run, agent_name):
+        target_state = AGENT_STATE_MAP.get(agent_name)
 
-        state = workflow_run.current_state
-
-        if state not in STATE_AGENT_MAP:
+        if not target_state:
+            print(f"Unknown agent '{agent_name}' for workflow {workflow_run.workflow_run_id}")
             return None
 
-        agent_name = STATE_AGENT_MAP[state]
-
-        print("____________________________\n\n\n\n\nRunning agent:", agent_name)
-        print("____________________________\n\n\n\n\nWorkspace:", workflow_run.workspace_root)
-
-        # Guard to prevent agent multiple times - per state per workflow run
         existing = self.session.exec(
-        select(AgentSession).where(
-            AgentSession.workflow_run_id == workflow_run.workflow_run_id,
-            AgentSession.agent_name == agent_name
+            select(AgentSession).where(
+                AgentSession.workflow_run_id == workflow_run.workflow_run_id,
+                AgentSession.agent_name == agent_name,
             )
         ).first()
-    
+
         if existing:
             print(f"Agent already executed for this state: {agent_name}")
             return None
@@ -67,13 +64,13 @@ class AgentRunner:
         )
         workspace = Path(workflow_run.workspace_root)
 
-        artifact_name = STATE_ARTIFACT_MAP.get(state, f"{agent_name}.md")
+        artifact_name = STATE_ARTIFACT_MAP.get(target_state, f"{agent_name}.md")
         artifact_path = workspace / artifact_name
 
         artifact_path.write_text(
             f"# {agent_name} Output\n\n"
             f"Workflow Run: {workflow_run.workflow_run_id}\n"
-            f"State: {state}\n"
+            f"State: {target_state}\n"
         )
 
         artifact_service = ArtifactService(self.session)
@@ -83,20 +80,6 @@ class AgentRunner:
             artifact_role="agent_output",
             artifact_type="markdown",
             file_path=str(artifact_path),
-        )
-
-        workflow_run = self.session.get(
-            WorkflowRun,
-            agent_session.workflow_run_id
-        )
-
-        append_workflow_event(
-            self.session,
-            workflow_run_id=workflow_run.workflow_run_id,
-            ticket_id=workflow_run.ticket_id,
-            trace_id=workflow_run.trace_id,
-            event_type="agent_completed",
-            message=f"{agent_session.agent_name} completed",
         )
 
         self.mark_agent_complete(agent_session)
@@ -127,8 +110,3 @@ class AgentRunner:
             message=f"{agent_session.agent_name} completed",
         )
     
-        # 🔥 THIS IS THE MISSING STEP
-        from app.services.orchestrator import Orchestrator
-    
-        orchestrator = Orchestrator(self.session)
-        orchestrator.advance(workflow_run)

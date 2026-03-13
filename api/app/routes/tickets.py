@@ -7,19 +7,21 @@ from app.models.workflow_run import WorkflowRun
 from app.models.workflow_event import WorkflowEvent
 from app.schemas.ticket_schema import TicketCreate
 from app.services.workflow_events import append_workflow_event
+from app.services.agent_queue import AgentQueue
+from app.workflows.ticket_to_pr import STATE_AGENT_MAP
 
 from app.services.orchestrator import Orchestrator
 from app.services.workspace_manager import WorkspaceManager
 
+
 router = APIRouter(
-    prefix="/tickets",
-    tags=["tickets"]
+	prefix="/tickets",
+	tags=["tickets"]
 )
 
 
 @router.post("")
 def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session)):
-
     new_ticket = Ticket(
         ticket_kind=ticket.ticket_kind,
         title=ticket.title,
@@ -36,9 +38,9 @@ def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session))
     attempt = len(existing_runs) + 1
 
     workflow = WorkflowRun(
-    ticket_id=new_ticket.ticket_id,
-    attempt=attempt,
-    current_state="TICKET_INTAKE",
+        ticket_id=new_ticket.ticket_id,
+        attempt=attempt,
+        current_state="TICKET_INTAKE",
     )
 
     session.add(workflow)
@@ -69,6 +71,12 @@ def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session))
         message="Workflow run started",
     )
 
+    queue = AgentQueue(session)
+    queue.enqueue(
+        workflow.workflow_run_id,
+        STATE_AGENT_MAP["TICKET_INTAKE"],
+    )
+
     return {
         "ticket_id": new_ticket.ticket_id,
         "workflow_run_id": workflow.workflow_run_id,
@@ -77,34 +85,29 @@ def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session))
         "state": workflow.current_state,
     }
 
+
 @router.get("")
 def list_tickets(session: Session = Depends(get_session)):
-
     tickets = session.exec(select(Ticket)).all()
-
     return tickets
+
 
 
 @router.get("/{ticket_id}")
 def get_ticket(ticket_id: str, session: Session = Depends(get_session)):
-
     ticket = session.get(Ticket, ticket_id)
-
     if not ticket:
         return {"error": "ticket not found"}
-
     return ticket
+
 
 @router.get("/{ticket_id}/workflow")
 def get_ticket_workflow(ticket_id: str, session: Session = Depends(get_session)):
-
     run = session.exec(
         select(WorkflowRun)
         .where(WorkflowRun.ticket_id == ticket_id)
         .order_by(WorkflowRun.started_at.desc())
     ).first()
-
     if not run:
         return {"error": "no workflow run"}
-
     return {"workflow_run_id": run.workflow_run_id}

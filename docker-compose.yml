@@ -29,8 +29,10 @@ services:
       
   worker:
     build: ./api
-    command: python -m app.workers.agent_worker
-    volumes:
-      - ./workspace:/workspace
+    command: >
+      sh -c "python -m app.workers.wait_for_gateway && python -m app.workers.agent_worker"
     depends_on:
       - api
+      - openclaw
+    volumes:
+      - ./workspace:/workspace
