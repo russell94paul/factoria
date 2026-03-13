@@ -1,19 +1,3 @@
-Below is a **complete, polished README** for your project **Factoria**.
-You can paste this directly into `README.md`.
-
-It includes:
-
-* Overview
-* Why Factoria Exists
-* Design Principles
-* Architecture
-* Setup
-* Development roadmap
-
-and is structured like a **professional engineering repository**.
-
----
-
 # Factoria
 
 Autonomous data engineering platform that converts data tickets into production-ready dbt pull requests using multi-agent orchestration.
