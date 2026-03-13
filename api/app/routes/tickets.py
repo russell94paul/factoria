@@ -69,9 +69,6 @@ def create_ticket(ticket: TicketCreate, session: Session = Depends(get_session))
         message="Workflow run started",
     )
 
-    orchestrator = Orchestrator(session)
-    orchestrator.advance(workflow)
-
     return {
         "ticket_id": new_ticket.ticket_id,
         "workflow_run_id": workflow.workflow_run_id,

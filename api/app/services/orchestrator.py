@@ -2,13 +2,11 @@ from sqlmodel import Session
 from app.models.workflow_run import WorkflowRun
 from app.services.workflow_events import append_workflow_event
 
-from app.services.agent_runner import AgentRunner
 
 class Orchestrator:
 
     def __init__(self, session: Session):
         self.session = session
-        self.agent_runner = AgentRunner(session)
 
         # State machine registry
         self.handlers = {
@@ -19,11 +17,16 @@ class Orchestrator:
             "QA": self.handle_qa,
         }
 
-    def advance(self, workflow):
+    # -------------------------
+    # Advance workflow
+    # -------------------------
+
+    def advance(self, workflow: WorkflowRun):
+
+        if workflow.status != "running":
+            return workflow
 
         state = workflow.current_state
-        # Run agent for current state - added to prevent workflow states from being incorrectly skipped
-        self.agent_runner.run_for_state(workflow)
 
         handler = self.handlers.get(state)
 
@@ -32,10 +35,13 @@ class Orchestrator:
 
         return handler(workflow)
 
+    # -------------------------
+    # State transition
+    # -------------------------
+
     def transition(self, workflow: WorkflowRun, new_state: str):
 
         old_state = workflow.current_state
-
         workflow.current_state = new_state
 
         append_workflow_event(
@@ -51,12 +57,21 @@ class Orchestrator:
         self.session.add(workflow)
         self.session.commit()
 
-        # Run agent for new state
-        self.agent_runner.run_for_state(workflow)
+        from app.services.agent_queue import AgentQueue
+        from app.workflows.ticket_to_pr import STATE_AGENT_MAP
+
+        # Queue agent execution for the new state
+        agent_name = STATE_AGENT_MAP.get(new_state)
+
+        if agent_name:
+            queue = AgentQueue(self.session)
+            queue.enqueue(workflow.workflow_run_id, agent_name)
 
         return workflow
 
-    # ---- State Handlers ----
+    # -------------------------
+    # State Handlers
+    # -------------------------
 
     def handle_ticket_intake(self, workflow: WorkflowRun):
 
@@ -76,4 +91,4 @@ class Orchestrator:
 
     def handle_qa(self, workflow: WorkflowRun):
 
-        return self.transition(workflow, "READY_FOR_REVIEW")
+        return self.transition(workflow, "PR_CREATION")

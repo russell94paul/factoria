@@ -105,25 +105,30 @@ class AgentRunner:
     
     def mark_agent_complete(self, agent_session: AgentSession):
 
-        # Prevent duplicate completion
         if agent_session.status == "completed":
             return
-
+    
         agent_session.status = "completed"
-
+    
         self.session.add(agent_session)
         self.session.commit()
-
+    
         workflow_run = self.session.get(
             WorkflowRun,
             agent_session.workflow_run_id
         )
-
+    
         append_workflow_event(
             self.session,
             workflow_run_id=workflow_run.workflow_run_id,
             ticket_id=workflow_run.ticket_id,
             trace_id=workflow_run.trace_id,
             event_type="agent_completed",
-            message=f"____________________________\n\n\n\n\n{agent_session.agent_name} completed",
+            message=f"{agent_session.agent_name} completed",
         )
+    
+        # 🔥 THIS IS THE MISSING STEP
+        from app.services.orchestrator import Orchestrator
+    
+        orchestrator = Orchestrator(self.session)
+        orchestrator.advance(workflow_run)

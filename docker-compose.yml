@@ -26,3 +26,11 @@ services:
       - openclaw
     volumes:
       - ./workspace:/workspace
+      
+  worker:
+    build: ./api
+    command: python -m app.workers.agent_worker
+    volumes:
+      - ./workspace:/workspace
+    depends_on:
+      - api

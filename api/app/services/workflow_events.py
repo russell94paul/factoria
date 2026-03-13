@@ -1,7 +1,6 @@
 from sqlmodel import Session, select
 from app.models.workflow_event import WorkflowEvent
 
-
 def append_workflow_event(
     session: Session,
     *,
@@ -26,7 +25,7 @@ def append_workflow_event(
 
     next_seq = (last.seq + 1) if last else 1
 
-    ev = WorkflowEvent(
+    event = WorkflowEvent(
         workflow_run_id=workflow_run_id,
         ticket_id=ticket_id,
         seq=next_seq,
@@ -40,7 +39,15 @@ def append_workflow_event(
         payload_json=payload_json,
     )
 
-    session.add(ev)
+    session.add(event)
     session.commit()
-    session.refresh(ev)
-    return ev
+    session.refresh(event)
+
+    # lazy import to avoid circular dependency
+    from app.services.workflow_event_consumer import WorkflowEventConsumer
+
+    consumer = WorkflowEventConsumer(session)
+    consumer.handle_event(event)
+
+
+    return event
