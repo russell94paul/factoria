@@ -36,3 +36,12 @@ services:
       - openclaw
     volumes:
       - ./workspace:/workspace
+
+  runner:
+    build: ./runner/app
+    ports:
+    - "9000:9000"
+    environment:
+      WORKSPACES_ROOT: /workspace
+    volumes:
+    - ./workspace:/workspace
