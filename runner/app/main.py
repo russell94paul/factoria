@@ -45,6 +45,7 @@ def run_job(request: RunRequest):
     }
 
     JOBS[job_id] = record
+    print(f"[runner] {job_id} -> {request.job} ({request.workspace})")
 
     try:
         record["status"] = "running"
@@ -54,21 +55,25 @@ def run_job(request: RunRequest):
         elif request.job == "echo":
             record["result"] = handle_echo(request.args, record)
         else:
-            raise HTTPException(status_code=400, detail="unknown job")
+            raise HTTPException(status_code=400, detail="unknown job")     
 
         record["status"] = "succeeded"
     except HTTPException as exc:
+        print(f"[runner] {job_id} FAILED: {exc.detail}")
         record["status"] = "failed"
         record["error"] = exc.detail
         record["finished_at"] = datetime.now(timezone.utc).isoformat()
         raise
     except Exception as exc:
+        print(f"[runner] {job_id} FAILED: {exc}")
         record["status"] = "failed"
         record["error"] = str(exc)
         record["finished_at"] = datetime.now(timezone.utc).isoformat()
         raise HTTPException(status_code=500, detail="job failed") from exc
 
     record["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    print(f"[runner] {job_id} -> {record['status']}")
 
     return {
         "job_id": job_id,

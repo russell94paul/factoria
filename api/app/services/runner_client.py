@@ -9,11 +9,11 @@ class RunnerClient:
     def __init__(self):
         self.base_url = os.getenv("RUNNER_URL", "http://runner:9000")
 
-    def write_files(self, workspace: str, files: List[Dict[str, Any]]):
+    def run_job(self, job: str, workspace: str, args: Dict[str, Any]):
         payload = {
-        "job": "workspace_write_files",
+        "job": job,
         "workspace": workspace,
-        "args": {"files": files},
+        "args": args,
         }
 
         response = requests.post(f"{self.base_url}/run", json=payload, timeout=30)
@@ -27,3 +27,28 @@ class RunnerClient:
             raise RuntimeError("runner job failed")
 
         return data.get("result", {})
+
+    def write_files(self, workspace: str, files: List[Dict[str, Any]]):
+        return self.run_job(
+            "workspace_write_files",
+            workspace,
+            {"files": files},
+    )
+
+    def run_dbt(
+        self,
+        job: str,
+        workspace: str,
+        project_dir: str,
+        profiles_dir: str | None = None,
+        select: str | None = None,
+        ):
+
+        args: Dict[str, Any] = {"project_dir": project_dir}
+
+        if profiles_dir:
+            args["profiles_dir"] = profiles_dir
+        if select:
+            args["select"] = select
+
+        return self.run_job(job, workspace, args)

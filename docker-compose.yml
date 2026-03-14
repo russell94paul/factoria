@@ -3,37 +3,18 @@ services:
   openclaw:
     build: ./gateway/openclaw
     ports:
-      - "18789:18789"
+    - "18789:18789"
     command:
       [
-        "node",
-        "openclaw.mjs",
-        "gateway",
-        "--bind",
-        "lan",
-        "--allow-unconfigured"
+      "node",
+      "openclaw.mjs",
+      "gateway",
+      "--bind",
+      "lan",
+      "--allow-unconfigured"
       ]
     environment:
       gateway__controlUi__allowedOrigins: "*"
-    volumes:
-     - ./workspace:/workspace
-
-  api:
-    build: ./api
-    ports:
-      - "8000:8000"
-    depends_on:
-      - openclaw
-    volumes:
-      - ./workspace:/workspace
-      
-  worker:
-    build: ./api
-    command: >
-      sh -c "python -m app.workers.wait_for_gateway && python -m app.workers.agent_worker"
-    depends_on:
-      - api
-      - openclaw
     volumes:
       - ./workspace:/workspace
 
@@ -44,4 +25,32 @@ services:
     environment:
       WORKSPACES_ROOT: /workspace
     volumes:
-    - ./workspace:/workspace
+      - ./workspace:/workspace
+
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - openclaw
+      - runner
+    environment:
+      RUNNER_URL: http://runner:9000
+      WORKSPACES_ROOT: /workspace
+    volumes:
+      - ./workspace:/workspace
+
+  worker:
+    build: ./api
+    command:
+      - sh
+      - -c
+      - python -m app.workers.wait_for_gateway && python -m app.workers.agent_worker
+    environment:
+      RUNNER_URL: http://runner:9000
+      WORKSPACES_ROOT: /workspace
+    volumes:
+      - ./workspace:/workspace
+    depends_on:
+      - api
+      - runner

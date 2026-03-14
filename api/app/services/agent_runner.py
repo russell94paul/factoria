@@ -12,13 +12,16 @@ from app.models.workflow_run import WorkflowRun
 from app.workflows.ticket_to_pr import STATE_AGENT_MAP
 
 WORKSPACES_ROOT = Path(os.getenv("WORKSPACES_ROOT", "/workspace")).resolve()
+DBT_PROJECT_SUBDIR = os.getenv("DBT_PROJECT_SUBDIR")
+DBT_PROFILES_SUBDIR = os.getenv("DBT_PROFILES_SUBDIR")
+DBT_SELECT = os.getenv("DBT_SELECT")
 
 STATE_ARTIFACT_MAP = {
-    "TICKET_INTAKE": "intake.md",
-    "DESIGN_REVIEW": "design.md",
-    "PROFILING": "profiling_report.json",
-    "BUILD": "build_summary.json",
-    "QA": "qa_report.md",
+"TICKET_INTAKE": "intake.md",
+"DESIGN_REVIEW": "design.md",
+"PROFILING": "profiling_report.json",
+"BUILD": "build_summary.json",
+"QA": "qa_report.md",
 }
 
 AGENT_STATE_MAP = {agent: state for state, agent in STATE_AGENT_MAP.items()}
@@ -31,88 +34,94 @@ class AgentRunner:
         self.client = OpenClawClient()
         self.runner = RunnerClient()
 
-    def run_task(self, workflow_run, agent_name):
+    def run_task(self, workflow_run, agent_name):   
 
-        target_state = AGENT_STATE_MAP.get(agent_name)
+        target_state = AGENT_STATE_MAP.get(agent_name)  
 
         if not target_state:
             print(f"Unknown agent '{agent_name}' for workflow {workflow_run.workflow_run_id}")
-            return None
+            return None 
 
         existing = self.session.exec(
             select(AgentSession).where(
             AgentSession.workflow_run_id == workflow_run.workflow_run_id,
             AgentSession.agent_name == agent_name,
         )
-        ).first()
+        ).first()   
 
         if existing:
             print(f"Agent already executed for this state: {agent_name}")
-            return None
+            return None 
 
         agent_session = AgentSession(
-        workflow_run_id=workflow_run.workflow_run_id,
-        ticket_id=workflow_run.ticket_id,
-        tenant_id="default",
-        agent_name=agent_name,
-        status="running",
-        )
+            workflow_run_id=workflow_run.workflow_run_id,
+            ticket_id=workflow_run.ticket_id,
+            tenant_id="default",
+            agent_name=agent_name,
+            status="running",
+        )   
 
         self.session.add(agent_session)
         self.session.commit()
-        self.session.refresh(agent_session)
+        self.session.refresh(agent_session) 
 
         result = self.client.start_agent(
-        agent_name=agent_name,
-        workflow_run_id=workflow_run.workflow_run_id,
-        )
+            agent_name=agent_name,
+            workflow_run_id=workflow_run.workflow_run_id,
+        )   
 
         artifact_name = STATE_ARTIFACT_MAP.get(target_state, f"{agent_name}.md")
         artifact_body = (
-        f"# {agent_name} Output\n\n"
-        f"Workflow Run: {workflow_run.workflow_run_id}\n"
-        f"State: {target_state}\n"
-        )
+            f"# {agent_name} Output\n\n"
+            f"Workflow Run: {workflow_run.workflow_run_id}\n"
+            f"State: {target_state}\n"
+        )   
 
         workspace_rel = self._workspace_relative_path(workflow_run.workspace_root)
         runner_result = self.runner.write_files(
-        workspace_rel,
-        [{"path": artifact_name, "content": artifact_body}]
-        )
+            workspace_rel,
+            [{"path": artifact_name, "content": artifact_body}]
+        )   
 
         written = runner_result.get("files_written", [])
         if not written:
-            raise RuntimeError("runner did not return written files")
+            raise RuntimeError("runner did not return written files")   
 
-        artifact_path = WORKSPACES_ROOT / written[0]
+        artifact_path = WORKSPACES_ROOT / written[0]    
 
         artifact_service = ArtifactService(self.session)
         artifact_service.register_artifact(
-        workflow_run_id=workflow_run.workflow_run_id,
-        ticket_id=workflow_run.ticket_id,
-        artifact_role="agent_output",
-        artifact_type="markdown",
-        file_path=str(artifact_path),
-        )
+            workflow_run_id=workflow_run.workflow_run_id,
+            ticket_id=workflow_run.ticket_id,
+            artifact_role="agent_output",
+            artifact_type="markdown",
+            file_path=str(artifact_path),
+        )   
 
-        self.mark_agent_complete(agent_session)
+        if target_state == "BUILD":
+            self._maybe_run_dbt("dbt_compile", workspace_rel)   
 
-        return result
+        if target_state == "QA":
+            self._maybe_run_dbt("dbt_build", workspace_rel) 
 
-    def mark_agent_complete(self, agent_session: AgentSession):
+        self.mark_agent_complete(agent_session) 
+
+        return result   
+
+    def mark_agent_complete(self, agent_session: AgentSession): 
 
         if agent_session.status == "completed":
-            return
+            return  
 
-        agent_session.status = "completed"
+        agent_session.status = "completed"  
 
         self.session.add(agent_session)
-        self.session.commit()
+        self.session.commit()   
 
         workflow_run = self.session.get(
-        WorkflowRun,
-        agent_session.workflow_run_id
-        )
+            WorkflowRun,
+            agent_session.workflow_run_id
+        )   
 
         append_workflow_event(
             self.session,
@@ -121,9 +130,9 @@ class AgentRunner:
             trace_id=workflow_run.trace_id,
             event_type="agent_completed",
             message=f"{agent_session.agent_name} completed",
-        )
+        )   
 
-        from app.services.orchestrator import Orchestrator
+        from app.services.orchestrator import Orchestrator  
 
         orchestrator = Orchestrator(self.session)
         orchestrator.advance(workflow_run)
@@ -131,4 +140,18 @@ class AgentRunner:
     def _workspace_relative_path(self, workspace_root: str) -> str:
         workspace = Path(workspace_root).resolve()
         return str(workspace.relative_to(WORKSPACES_ROOT))
-    
+
+    def _maybe_run_dbt(self, job: str, workspace_rel: str):
+        if not DBT_PROJECT_SUBDIR:
+            return
+
+        try:
+            self.runner.run_dbt(
+            job,
+            workspace_rel,
+            DBT_PROJECT_SUBDIR,
+            DBT_PROFILES_SUBDIR,
+            DBT_SELECT,
+            )
+        except RuntimeError as exc:
+            print(f"[runner] {job} failed: {exc}")
