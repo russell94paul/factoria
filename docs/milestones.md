@@ -111,3 +111,102 @@ No UI changes, no new workflow states, no schema changes — the goal is to make
 - Human approval gates (`DESIGN_REVIEW`, `READY_FOR_REVIEW`) can be bypassed in the dev seed script via a direct orchestrator call — the gate logic itself should not be removed.
 - Do not start on UI polish (Milestone 2) or live credential wiring (Milestone 3) until this milestone’s acceptance evidence is checked off.
 
+---
+
+## Milestone 2: Surface Artefacts in the Next.js UI
+
+Owner: Claude Code
+Status: planned
+
+### Scope
+
+Scaffold a Next.js application in `web/` and build three views that make the Milestone 1 artefact pipeline visible to a human reviewer without touching the terminal:
+
+1. **Kanban board** — tickets as cards in columns matching workflow states; gate approval buttons inline.
+2. **Ticket detail drawer** — artefact viewer (Markdown + JSON rendered), agent timeline (state transitions + agent sessions), and runner job list.
+3. **Create-ticket form** — minimal form to create a new ticket and watch it run.
+
+The backend API already has the necessary endpoints for most of this; a small number of new read-only endpoints must be added to serve artefact content and agent session data.
+
+No new workflow states, no schema changes, no Snowflake/GitHub credential wiring — all data comes from the existing SQLite DB and workspace files written by Milestone 1.
+
+### Success Criteria
+
+1. **Kanban board renders** all tickets grouped by `state` in the correct column order (`TICKET_INTAKE → DESIGN_REVIEW → PROFILING → BUILD → QA → READY_FOR_REVIEW → PR_CREATION → DONE`). Cards show ticket title, state, and elapsed time.
+2. **Gate approval works from the UI** — clicking "Approve" on a `DESIGN_REVIEW` or `READY_FOR_REVIEW` card calls the existing `POST /workflows/{id}/gates/{gate}/approve` endpoint and the card moves to the next column without a page reload.
+3. **Ticket drawer opens** on card click and shows:
+   - All artefacts for the run, grouped by role (design_doc, profiling_report, dbt_model, qa_evidence, pr_summary).
+   - Artefact content rendered in-page: Markdown files as HTML, JSON files as formatted code blocks.
+   - Agent timeline: ordered list of `workflow_events` rows (state transitions + agent_completed + artifact_created) with timestamps.
+4. **Create-ticket form** submits to `POST /tickets` and the new card appears on the board.
+5. **Board auto-refreshes** (polling every 3 s is acceptable; WebSocket is a stretch goal) so a running `dev_seed.py` smoke run is visible as cards moving across the board in real time.
+6. **PR link is clickable** on `DONE`/`PR_CREATION` cards that have a `docs/pr_summary.md` artefact containing a PR URL.
+
+### Dependencies
+
+**New API endpoints required (read-only):**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /tickets/{id}/artifacts` | List all `Artifact` rows for the ticket’s current run |
+| `GET /artifacts/{id}/content` | Serve the raw file content of an artefact from the workspace volume |
+| `GET /workflows/{id}/sessions` | List `AgentSession` rows for a run (for timeline) |
+
+**Existing endpoints consumed as-is:**
+
+| Endpoint | Used for |
+|---|---|
+| `GET /tickets` | Kanban board initial load |
+| `GET /tickets/{id}` | Ticket detail |
+| `GET /workflows/{id}` | Workflow state + full event log |
+| `POST /tickets` | Create-ticket form |
+| `POST /workflows/{id}/gates/{gate}/approve` | Gate approval buttons |
+
+**Frontend stack** (to be scaffolded in `web/`):
+- Next.js 14 (App Router) with TypeScript
+- Tailwind CSS for layout/styling
+- `react-markdown` for rendering Markdown artefacts
+- No additional state-management library needed at this scope
+
+### Artefacts / Files to Touch
+
+| Location | Change |
+|---|---|
+| `web/` | Scaffold new Next.js app (currently empty directory) |
+| `web/src/app/page.tsx` | Kanban board root page |
+| `web/src/app/tickets/[id]/page.tsx` | Ticket detail / drawer page |
+| `web/src/lib/api.ts` | Typed fetch helpers for all consumed endpoints |
+| `web/src/components/KanbanBoard.tsx` | Column + card layout |
+| `web/src/components/TicketCard.tsx` | Individual card with state badge + gate button |
+| `web/src/components/TicketDrawer.tsx` | Slide-over panel: artefact viewer + timeline tabs |
+| `web/src/components/ArtifactViewer.tsx` | Renders Markdown or JSON artefact content |
+| `web/src/components/AgentTimeline.tsx` | Ordered list of workflow events |
+| `api/app/routes/artifacts.py` | New route: list artefacts + serve content |
+| `api/app/routes/sessions.py` | New route: list agent sessions per run |
+| `api/app/main.py` | Register two new routers |
+
+### Suggested Task Order
+
+1. **Add two new API routes** (`artifacts.py`, `sessions.py`) and register them — needed before any frontend work can be tested end-to-end.
+2. **Scaffold Next.js app** in `web/` (`npx create-next-app@14 --typescript --tailwind --app --src-dir --no-eslint .`).
+3. **Build `api.ts`** typed fetch helpers for all 7 endpoints.
+4. **Kanban board** — `KanbanBoard` + `TicketCard` with polling; gate approval button wired.
+5. **Ticket drawer** — `TicketDrawer` with two tabs: Artefacts (`ArtifactViewer`) and Timeline (`AgentTimeline`).
+6. **Create-ticket form** — inline modal on the board page.
+7. **Smoke walkthrough** — run `dev_seed.py` while the board is open; verify cards move and artefacts appear without manual refresh.
+
+### Acceptance Evidence
+
+- [ ] Screenshot of Kanban board showing a completed ticket in the `DONE` column.
+- [ ] Screenshot of the ticket drawer open on a `DONE` ticket, artefact tab showing rendered `docs/design.md` and `docs/qa_report.md`.
+- [ ] Screenshot of the timeline tab showing `state_transition` and `artifact_created` events in order.
+- [ ] Screen recording (or written log) of a `dev_seed.py` run visible as live card movement on the board (polling).
+- [ ] Gate approval flow: ticket at `DESIGN_REVIEW` → click Approve in UI → card moves to `PROFILING` without page reload.
+
+### Notes
+
+- `api` container mounts the workspace volume read-only; artefact content can be served directly from disk via `GET /artifacts/{id}/content` reading from `file_path` stored in the `Artifact` DB row.
+- Do not implement WebSocket streaming in M2 — polling every 3 s is sufficient and keeps scope tight. WebSocket is listed as a stretch goal for M3/M4.
+- Keep UI functional over polished — this is a hackathon demo, not a production product. A clean Tailwind layout is sufficient; avoid reaching for heavy component libraries.
+- Do not touch `agent_runner.py`, `orchestrator.py`, or runner logic — M2 is read-only from the backend’s perspective (plus the two small new read-only routes).
+
