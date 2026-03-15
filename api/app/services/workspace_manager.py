@@ -1,14 +1,14 @@
+import os
 from pathlib import Path
 
-WORKSPACE_ROOT = Path("/workspace")
+WORKSPACES_ROOT = Path(os.getenv("WORKSPACES_ROOT", "/workspace")).resolve()
 
 
 class WorkspaceManager:
 
-    def create_run_workspace(self, tenant_id, ticket_id, workflow_run_id):
-
+    def create_run_workspace(self, tenant_id: str, ticket_id: str, workflow_run_id: str) -> Path:
         path = (
-            WORKSPACE_ROOT
+            WORKSPACES_ROOT
             / "tenants"
             / str(tenant_id)
             / "tickets"
@@ -16,7 +16,5 @@ class WorkspaceManager:
             / "runs"
             / str(workflow_run_id)
         )
-
         path.mkdir(parents=True, exist_ok=True)
-
         return path
