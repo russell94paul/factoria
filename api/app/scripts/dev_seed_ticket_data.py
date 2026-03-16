@@ -2,14 +2,21 @@
 dev_seed_ticket_data.py — Smoke-test script for Milestone 5.
 
 Creates a ticket with structured requirements, uploads two CSVs,
-polls the workflow to DONE (auto-approving gates), then prints
-a data preview and the full artefact listing.
+then optionally polls the workflow to DONE and prints a data preview
+and artefact listing.
 
 Usage (from repo root, with API running on localhost:8000):
     python -m app.scripts.dev_seed_ticket_data
 
-Or with a custom base:
-    API_BASE=http://localhost:8000 python -m app.scripts.dev_seed_ticket_data
+Flags:
+    --skip-ticket       Create the ticket and upload files, then stop.
+                        Does not poll the workflow.
+
+Environment variables:
+    API_BASE            API base URL (default: http://localhost:8000)
+    WORKSPACES_ROOT     Path to workspace root (default: ./workspace)
+    AUTO_APPROVE_GATES  Set to "false" to log gate states without auto-approving.
+                        Defaults to "true" so CI stays stable.
 """
 
 import csv
@@ -25,6 +32,8 @@ API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 POLL_INTERVAL = 2
 TIMEOUT = 240
 WORKSPACES_ROOT = Path(os.getenv("WORKSPACES_ROOT", "./workspace"))
+
+AUTO_APPROVE_GATES = os.getenv("AUTO_APPROVE_GATES", "true").lower() not in ("false", "0", "no")
 
 GATED_STATES = {"DESIGN_REVIEW", "READY_FOR_REVIEW"}
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
@@ -54,24 +63,28 @@ def _make_products_csv() -> bytes:
     w = csv.writer(buf)
     w.writerow(["product_id", "product_name", "category", "unit_price"])
     products = [
-        ("Widget A", "Hardware", 29.99),
-        ("Widget B", "Hardware", 49.99),
-        ("Gadget X", "Electronics", 99.99),
-        ("Gadget Y", "Electronics", 149.99),
-        ("Service P", "Software", 19.99),
-        ("Service Q", "Software", 39.99),
-        ("Tool Alpha", "Tools", 24.99),
-        ("Tool Beta", "Tools", 44.99),
-        ("Part One", "Parts", 9.99),
-        ("Part Two", "Parts", 14.99),
+        ("P01", "Widget A", "Hardware", 29.99),
+        ("P02", "Widget B", "Hardware", 49.99),
+        ("P03", "Gadget X", "Electronics", 99.99),
+        ("P04", "Gadget Y", "Electronics", 149.99),
+        ("P05", "Service P", "Software", 19.99),
+        ("P06", "Service Q", "Software", 39.99),
+        ("P07", "Tool Alpha", "Tools", 24.99),
+        ("P08", "Tool Beta", "Tools", 44.99),
+        ("P09", "Part One", "Parts", 9.99),
+        ("P10", "Part Two", "Parts", 14.99),
     ]
-    for i, (name, cat, price) in enumerate(products, 1):
-        w.writerow([f"P{i:02d}", name, cat, price])
+    for pid, pname, cat, price in products:
+        w.writerow([pid, pname, cat, price])
     return buf.getvalue().encode()
 
 
 def main():
+    skip_ticket = "--skip-ticket" in sys.argv
+
     print(f"[seed_data] API: {API_BASE}")
+    print(f"[seed_data] AUTO_APPROVE_GATES: {AUTO_APPROVE_GATES}")
+    print(f"[seed_data] skip_ticket: {skip_ticket}")
     print()
 
     # --- Step 1: Create ticket with requirements ---
@@ -115,7 +128,7 @@ def main():
     if up1.status_code != 200:
         print(f"[seed_data] ERROR uploading sales.csv: {up1.status_code} {up1.text}")
         sys.exit(1)
-    print(f"[seed_data] → file_id: {up1.json()['file_id']}  size: {up1.json()['size_bytes']} bytes")
+    print(f"[seed_data] -> file_id: {up1.json()['file_id']}  size: {up1.json()['size_bytes']} bytes")
 
     print("[seed_data] Uploading products.csv …")
     up2 = requests.post(
@@ -126,8 +139,15 @@ def main():
     if up2.status_code != 200:
         print(f"[seed_data] ERROR uploading products.csv: {up2.status_code} {up2.text}")
         sys.exit(1)
-    print(f"[seed_data] → file_id: {up2.json()['file_id']}  size: {up2.json()['size_bytes']} bytes")
+    print(f"[seed_data] -> file_id: {up2.json()['file_id']}  size: {up2.json()['size_bytes']} bytes")
     print()
+
+    if skip_ticket:
+        print("[seed_data] --skip-ticket set — stopping after uploads.")
+        print(f"[seed_data] ticket_id: {ticket_id}")
+        print(f"[seed_data] Verify uploads: GET {API_BASE}/tickets/{ticket_id}/uploads")
+        print("[seed_data] Done (partial).")
+        return
 
     # --- Step 3: Poll workflow ---
     deadline = time.time() + TIMEOUT
@@ -147,14 +167,17 @@ def main():
         print(f"[seed_data] state={state:<25} status={status}")
 
         if state in GATED_STATES and state not in approved_gates:
-            print(f"[seed_data] approving gate: {state}")
-            gate_resp = requests.post(
-                f"{API_BASE}/workflows/{workflow_run_id}/gates/{state}/approve",
-                timeout=10,
-            )
-            if gate_resp.status_code == 200:
-                approved_gates.add(state)
-                print(f"[seed_data] gate approved → {gate_resp.json().get('state')}")
+            if AUTO_APPROVE_GATES:
+                print(f"[seed_data] approving gate: {state}")
+                gate_resp = requests.post(
+                    f"{API_BASE}/workflows/{workflow_run_id}/gates/{state}/approve",
+                    timeout=10,
+                )
+                if gate_resp.status_code == 200:
+                    approved_gates.add(state)
+                    print(f"[seed_data] gate approved -> {gate_resp.json().get('state')}")
+            else:
+                print(f"[seed_data] gate {state} waiting — AUTO_APPROVE_GATES=false, approve manually")
 
         if status in TERMINAL_STATUSES:
             break
@@ -165,6 +188,11 @@ def main():
         sys.exit(1)
 
     print()
+
+    if not AUTO_APPROVE_GATES and wf.get("status") != "succeeded":
+        print(f"[seed_data] Workflow paused (AUTO_APPROVE_GATES=false). state={wf.get('current_state')}")
+        print("[seed_data] Done (partial).")
+        return
 
     if wf.get("status") != "succeeded":
         print(f"[seed_data] FAILED — status={wf.get('status')}")
@@ -197,7 +225,7 @@ def main():
         print(f"[seed_data] preview unavailable: {preview_resp.status_code}")
     print()
 
-    # --- Step 5: Upload schema from GET /uploads ---
+    # --- Step 5: Upload schemas ---
     print("=" * 60)
     print("Uploaded File Schemas")
     print("=" * 60)
@@ -212,7 +240,7 @@ def main():
                 print("    (schema pending ingestion)")
     print()
 
-    # --- Step 6: Workspace artefact listing ---
+    # --- Step 6: Artefact listing ---
     print("=" * 60)
     print("Workspace Artefacts")
     print("=" * 60)
@@ -227,7 +255,6 @@ def main():
             if p.is_file():
                 print(f"  {p.relative_to(ws)}  ({p.stat().st_size:,} bytes)")
 
-    # Check catalog.duckdb
     catalogs = list(WORKSPACES_ROOT.glob(f"tenants/*/tickets/{ticket_id}/duckdb/catalog.duckdb"))
     if catalogs:
         print(f"\n[seed_data] catalog.duckdb confirmed: {catalogs[0]}")

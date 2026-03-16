@@ -2,14 +2,20 @@
 dev_seed_tenant.py — Smoke-test script for Milestone 4.
 
 Creates a tenant, polls the provisioning workflow to completion (with one
-automatic retry on first failure), then creates a data-engineering ticket
-and runs it through to DONE, auto-approving both gates.
+automatic retry on first failure), then optionally creates a data-engineering
+ticket and runs it through to DONE.
 
 Usage (from repo root, with API running on localhost:8000):
     python -m app.scripts.dev_seed_tenant
 
-Or with a custom API base URL:
-    API_BASE=http://localhost:8000 python -m app.scripts.dev_seed_tenant
+Flags:
+    --skip-ticket       Provision the tenant only; do not create/run a ticket workflow.
+
+Environment variables:
+    API_BASE            API base URL (default: http://localhost:8000)
+    WORKSPACES_ROOT     Path to workspace root (default: ./workspace)
+    AUTO_APPROVE_GATES  Set to "false" to log gates but not auto-approve them.
+                        Defaults to "true" so CI stays stable.
 """
 
 import os
@@ -20,16 +26,18 @@ from pathlib import Path
 import requests
 
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
-POLL_INTERVAL = 2       # seconds between status checks
-TIMEOUT = 180           # seconds before giving up
+POLL_INTERVAL = 2
+TIMEOUT = 180
 WORKSPACES_ROOT = Path(os.getenv("WORKSPACES_ROOT", "./workspace"))
+
+AUTO_APPROVE_GATES = os.getenv("AUTO_APPROVE_GATES", "true").lower() not in ("false", "0", "no")
 
 GATED_STATES = {"DESIGN_REVIEW", "READY_FOR_REVIEW"}
 TERMINAL_WF_STATUSES = {"succeeded", "failed", "cancelled"}
 TERMINAL_TENANT_STATUSES = {"ready", "error", "disabled"}
 
 
-def poll_workflow(workflow_run_id: str, timeout: int, label: str, auto_approve_gates: bool = False) -> dict:
+def poll_workflow(workflow_run_id: str, timeout: int, label: str) -> dict:
     """Poll a workflow run until terminal or timeout. Returns final workflow dict."""
     deadline = time.time() + timeout
     approved_gates: set[str] = set()
@@ -47,17 +55,20 @@ def poll_workflow(workflow_run_id: str, timeout: int, label: str, auto_approve_g
         status = wf.get("status", "?")
         print(f"[{label}] state={current_state:<25} status={status}")
 
-        if auto_approve_gates and current_state in GATED_STATES and current_state not in approved_gates:
-            print(f"[{label}] approving gate: {current_state}")
-            gate_resp = requests.post(
-                f"{API_BASE}/workflows/{workflow_run_id}/gates/{current_state}/approve",
-                timeout=10,
-            )
-            if gate_resp.status_code == 200:
-                approved_gates.add(current_state)
-                print(f"[{label}] gate approved -> {gate_resp.json().get('state')}")
+        if current_state in GATED_STATES and current_state not in approved_gates:
+            if AUTO_APPROVE_GATES:
+                print(f"[{label}] approving gate: {current_state}")
+                gate_resp = requests.post(
+                    f"{API_BASE}/workflows/{workflow_run_id}/gates/{current_state}/approve",
+                    timeout=10,
+                )
+                if gate_resp.status_code == 200:
+                    approved_gates.add(current_state)
+                    print(f"[{label}] gate approved -> {gate_resp.json().get('state')}")
+                else:
+                    print(f"[{label}] gate approval failed: {gate_resp.status_code} {gate_resp.text}")
             else:
-                print(f"[{label}] gate approval failed: {gate_resp.status_code} {gate_resp.text}")
+                print(f"[{label}] gate {current_state} waiting — AUTO_APPROVE_GATES=false, approve manually")
 
         if status in TERMINAL_WF_STATUSES:
             return wf
@@ -69,7 +80,6 @@ def poll_workflow(workflow_run_id: str, timeout: int, label: str, auto_approve_g
 
 
 def poll_tenant(tenant_id: str, timeout: int, label: str) -> dict:
-    """Poll tenant status until ready/error or timeout."""
     deadline = time.time() + timeout
     tenant = {}
 
@@ -95,10 +105,14 @@ def poll_tenant(tenant_id: str, timeout: int, label: str) -> dict:
 
 
 def main():
+    skip_ticket = "--skip-ticket" in sys.argv
+
     print(f"[seed_tenant] API: {API_BASE}")
+    print(f"[seed_tenant] AUTO_APPROVE_GATES: {AUTO_APPROVE_GATES}")
+    print(f"[seed_tenant] skip_ticket: {skip_ticket}")
     print()
 
-    # --- Step 1: Create tenant ---
+    # --- Step 1: Create or fetch tenant ---
     resp = requests.post(f"{API_BASE}/tenants", json={
         "tenant_key": "retail_001",
         "name": "Retail Demo",
@@ -125,19 +139,17 @@ def main():
     print(f"[seed_tenant] workflow_run_id : {workflow_run_id}")
     print()
 
-    # --- Step 2: Poll tenant provisioning ---
+    # --- Step 2: Poll provisioning ---
     tenant = poll_tenant(tenant_id, TIMEOUT, "provision")
     print()
 
-    # Auto-retry once on error
     if tenant.get("status") == "error":
         print("[seed_tenant] provisioning failed, attempting one retry...")
         retry_resp = requests.post(f"{API_BASE}/tenants/{tenant_id}/provision", timeout=10)
         if retry_resp.status_code != 200:
             print(f"[seed_tenant] ERROR starting retry: {retry_resp.status_code} {retry_resp.text}")
             sys.exit(1)
-        new_wf_id = retry_resp.json().get("workflow_run_id")
-        print(f"[seed_tenant] retry workflow_run_id: {new_wf_id}")
+        print(f"[seed_tenant] retry workflow_run_id: {retry_resp.json().get('workflow_run_id')}")
         print()
         tenant = poll_tenant(tenant_id, TIMEOUT, "provision-retry")
         print()
@@ -147,9 +159,15 @@ def main():
         sys.exit(1)
 
     print("[seed_tenant] Tenant is READY")
+
+    if skip_ticket:
+        print("[seed_tenant] --skip-ticket set — stopping after tenant provisioning.")
+        print("[seed_tenant] Done.")
+        return
+
     print()
 
-    # --- Step 3: Create a data-engineering ticket ---
+    # --- Step 3: Create ticket ---
     resp = requests.post(f"{API_BASE}/tickets", json={
         "ticket_kind": "DATA_ENGINEERING",
         "title": "Add fct_daily_orders from RAW.ORDERS and RAW.CUSTOMERS",
@@ -172,8 +190,14 @@ def main():
     print()
 
     # --- Step 4: Poll ticket workflow ---
-    wf = poll_workflow(ticket_wf_id, TIMEOUT, "ticket", auto_approve_gates=True)
+    wf = poll_workflow(ticket_wf_id, TIMEOUT, "ticket")
     print()
+
+    if not AUTO_APPROVE_GATES and wf.get("status") != "succeeded":
+        print(f"[seed_tenant] Workflow paused at gate (AUTO_APPROVE_GATES=false). Approve manually.")
+        print(f"[seed_tenant] Current state: {wf.get('current_state')}  status: {wf.get('status')}")
+        print("[seed_tenant] Done (partial).")
+        return
 
     if wf.get("status") != "succeeded":
         print(f"[seed_tenant] FAILED — ticket workflow ended status={wf.get('status')}")
@@ -185,23 +209,13 @@ def main():
     print("[seed_tenant] Ticket workflow SUCCEEDED")
     print()
 
-    # --- Step 5: Print workspace artefact listing ---
+    # --- Step 5: Artefact listing ---
     print("=" * 60)
     print("Tenant workspace artefacts")
     print("=" * 60)
 
     tenant_detail = requests.get(f"{API_BASE}/tenants/{tenant_id}", timeout=10).json()
-    workspace_root = tenant_detail.get("workspace_root")
 
-    if workspace_root:
-        # Find the ticket run workspace (may differ from tenant workspace)
-        ticket_dirs = list(WORKSPACES_ROOT.glob(f"tenants/{tenant_id}/tickets/{ticket_id}/runs/*"))
-        tenant_dirs = list(WORKSPACES_ROOT.glob(f"tenants/{tenant_id}/tickets/*/runs/*/bootstrap"))
-    else:
-        ticket_dirs = []
-        tenant_dirs = []
-
-    # Print bootstrap dir
     bootstrap_dirs = list(WORKSPACES_ROOT.glob(f"tenants/{tenant_id}/**/bootstrap"))
     for bd in bootstrap_dirs:
         print(f"\nBootstrap dir: {bd}")
@@ -209,16 +223,14 @@ def main():
             if p.is_file():
                 print(f"  {p.relative_to(bd)}  ({p.stat().st_size} bytes)")
 
-    # Print ticket workspace
+    ticket_dirs = list(WORKSPACES_ROOT.glob(f"tenants/{tenant_id}/tickets/{ticket_id}/runs/*"))
     if ticket_dirs:
         workspace = ticket_dirs[0]
         print(f"\nTicket workspace: {workspace}")
         for p in sorted(workspace.rglob("*")):
             if p.is_file():
-                size = p.stat().st_size
-                print(f"  {p.relative_to(workspace)}  ({size} bytes)")
+                print(f"  {p.relative_to(workspace)}  ({p.stat().st_size} bytes)")
 
-    # Verify duckdb exists
     db_files = list(WORKSPACES_ROOT.glob(f"tenants/{tenant_id}/**/factoria.duckdb"))
     if db_files:
         print(f"\n[seed_tenant] DuckDB confirmed: {db_files[0]}")

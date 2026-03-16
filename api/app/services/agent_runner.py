@@ -333,12 +333,15 @@ class AgentRunner:
             }, seq=1)
             table_schemas = load_result.get("tables", {})
 
-            # Update UploadedFile rows with inferred schema (must match runner's _safe_stem)
+            # Update UploadedFile rows with inferred schema.
+            # Must match runner's table name derivation: _safe_stem then strip RAW_ prefix.
             for upload in uploads:
                 stem = Path(upload.filename).stem.upper().replace("-", "_").replace(" ", "_")
                 stem = re.sub(r"[^A-Z0-9_]", "_", stem)
                 if stem[0:1].isdigit():
                     stem = f"T_{stem}"
+                if stem.startswith("RAW_"):
+                    stem = stem[4:]
                 if stem in table_schemas:
                     upload.schema_json = json.dumps(table_schemas[stem])
                     self.session.add(upload)
@@ -353,6 +356,19 @@ class AgentRunner:
                 {"path": "outputs/data_dictionary.json", "content": dd_json}
             ])
             self._register_and_emit(wf, written_dd[0], "data_dictionary", "profiling_report")
+
+            # Write raw_tables.json — proves what landed in the catalog
+            raw_tables_info = {
+                tbl: {
+                    "row_count": info.get("row_count", 0),
+                    "columns": [{"name": c["name"], "type": c["type"]} for c in info.get("columns", [])],
+                }
+                for tbl, info in dd_result.get("tables", {}).items()
+            }
+            written_rt = self._write_files(workspace_rel, [
+                {"path": "outputs/raw_tables.json", "content": json.dumps(raw_tables_info, indent=2)}
+            ])
+            self._register_and_emit(wf, written_rt[0], "raw_tables_json", "profiling_report")
         else:
             dd_result = {}
 
