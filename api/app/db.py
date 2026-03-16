@@ -14,6 +14,7 @@ from app.models.agent_session import AgentSession
 from app.models.gate_approval import GateApproval
 from app.models.tenant import Tenant
 from app.models.runner_job import RunnerJob
+from app.models.uploaded_file import UploadedFile
 
 
 def create_db_and_tables():

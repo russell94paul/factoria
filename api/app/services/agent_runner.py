@@ -28,11 +28,13 @@ from app.models.agent_session import AgentSession
 from app.models.runner_job import RunnerJob
 from app.models.tenant import Tenant
 from app.models.ticket import Ticket
+from app.models.uploaded_file import UploadedFile
 from app.models.workflow_run import WorkflowRun
 from app.services.artifact_service import ArtifactService
 from app.services.openclaw_service import OpenClawClient
 from app.services.runner_client import RunnerClient
 from app.services.workflow_events import append_workflow_event
+from app.services.workspace_manager import WorkspaceManager
 from app.utils.time import utc_now
 from app.workflows.ticket_to_pr import STATE_AGENT_MAP
 from app.workflows.tenant_provisioning import STATE_AGENT_MAP as PROVISIONING_STATE_AGENT_MAP
@@ -115,6 +117,8 @@ class AgentRunner:
                 self._run_qa(workflow_run, ticket, workspace_root, workspace_rel)
             elif target_state == "PR_CREATION":
                 self._run_pr(workflow_run, ticket, workspace_root, workspace_rel)
+            elif target_state == "DATA_INGESTION":
+                self._run_data_ingestion(workflow_run, ticket, workspace_root, workspace_rel)
             elif target_state == "PROVISIONING_REQUESTED":
                 self._run_tenant_provisioning(workflow_run, ticket, workspace_root, workspace_rel)
             else:
@@ -174,29 +178,36 @@ class AgentRunner:
     def _run_profiling(self, wf: WorkflowRun, ticket: Ticket, workspace_root: str, workspace_rel: str):
         slug = _slugify(ticket.title)
 
-        queries = [
-            "SELECT COUNT(*) AS row_count FROM RAW.ORDERS",
-            "SELECT COUNT(DISTINCT customer_id) AS distinct_customers, COUNT(*) AS total FROM RAW.ORDERS",
-            "SELECT COUNT(*) - COUNT(order_id) AS null_order_ids, COUNT(*) AS total FROM RAW.ORDERS",
-        ]
+        # Use ticket-level catalog if it exists (populated by DataIngestionAgent)
+        tenant_id = ticket.tenant_id or "default"
+        wm = WorkspaceManager()
+        catalog_path = wm.get_catalog_path(tenant_id, wf.ticket_id)
+        # Only use catalog if the .duckdb file was actually created by data ingestion
+        catalog_rel = str(catalog_path.relative_to(WORKSPACES_ROOT)) if catalog_path.is_file() else None
+
+        # Build profiling queries from available tables in catalog
+        queries = self._build_profiling_queries(catalog_rel, workspace_rel)
+
         all_results = []
         for q in queries:
-            result = self.runner.run_job(
-                "snowflake_sql",
-                workspace_rel,
-                {"query": q, "connection": "default"},
-            )
+            job_args: dict = {"query": q, "connection": "default"}
+            if catalog_rel:
+                job_args["catalog_path"] = catalog_rel
+            result = self.runner.run_job("snowflake_sql", workspace_rel, job_args)
             all_results.append(result)
+
+        first_rows = (all_results[0].get("rows") or [{}])[0] if all_results else {}
+        second_rows = (all_results[1].get("rows") or [{}])[0] if len(all_results) > 1 else {}
 
         profile = {
             "ticket_id": wf.ticket_id,
             "slug": slug,
             "profiled_at": _now_iso(),
-            "sources": ["RAW.ORDERS", "RAW.CUSTOMERS"],
+            "sources": list(first_rows.keys()) or ["RAW.ORDERS"],
             "query_results": all_results,
             "summary": {
-                "row_count": (all_results[0].get("rows") or [{}])[0].get("row_count", 10000),
-                "distinct_customers": (all_results[1].get("rows") or [{}])[0].get("distinct_customers", 3500),
+                "row_count": first_rows.get("row_count", first_rows.get("total", 0)),
+                "distinct_customers": second_rows.get("distinct_customers", second_rows.get("total", 0)),
                 "null_issues": [],
             },
         }
@@ -299,6 +310,83 @@ class AgentRunner:
         pr_summary = _render_pr_summary(ticket, slug, branch, commit_sha, pr_url, pr_number, changed_files)
         written = self._write_files(workspace_rel, [{"path": "docs/pr_summary.md", "content": pr_summary}])
         self._register_and_emit(wf, written[0], "pr_summary_md", "pr_summary")
+
+    def _run_data_ingestion(self, wf: WorkflowRun, ticket: Ticket, workspace_root: str, workspace_rel: str):
+        tenant_id = ticket.tenant_id or "default"
+        catalog_path = WorkspaceManager().get_catalog_path(tenant_id, wf.ticket_id)
+        catalog_rel = str(catalog_path.relative_to(WORKSPACES_ROOT))
+
+        uploads = self.session.exec(
+            select(UploadedFile).where(UploadedFile.ticket_id == wf.ticket_id)
+        ).all()
+
+        file_paths = [
+            str(Path(u.stored_path).relative_to(WORKSPACES_ROOT)) for u in uploads
+            if Path(u.stored_path).exists()
+        ]
+
+        table_schemas: dict = {}
+        if file_paths:
+            load_result = self._run_job_tracked(wf, "load_ticket_data", workspace_rel, {
+                "catalog_path": catalog_rel,
+                "file_paths": file_paths,
+            }, seq=1)
+            table_schemas = load_result.get("tables", {})
+
+            # Update UploadedFile rows with inferred schema (must match runner's _safe_stem)
+            for upload in uploads:
+                stem = Path(upload.filename).stem.upper().replace("-", "_").replace(" ", "_")
+                stem = re.sub(r"[^A-Z0-9_]", "_", stem)
+                if stem[0:1].isdigit():
+                    stem = f"T_{stem}"
+                if stem in table_schemas:
+                    upload.schema_json = json.dumps(table_schemas[stem])
+                    self.session.add(upload)
+            self.session.commit()
+
+            dd_result = self._run_job_tracked(wf, "get_data_dictionary", workspace_rel, {
+                "catalog_path": catalog_rel,
+            }, seq=2)
+
+            dd_json = json.dumps(dd_result, indent=2)
+            written_dd = self._write_files(workspace_rel, [
+                {"path": "outputs/data_dictionary.json", "content": dd_json}
+            ])
+            self._register_and_emit(wf, written_dd[0], "data_dictionary", "profiling_report")
+        else:
+            dd_result = {}
+
+        # Build and register requirements.md
+        req_md = _render_requirements_md(ticket, uploads, table_schemas)
+        written = self._write_files(workspace_rel, [{"path": "docs/requirements.md", "content": req_md}])
+        self._register_and_emit(wf, written[0], "requirements_md", "design_doc")
+
+    def _build_profiling_queries(self, catalog_rel: str | None, workspace_rel: str) -> list[str]:
+        """Return profiling queries appropriate for the available data source."""
+        if not catalog_rel:
+            return [
+                "SELECT COUNT(*) AS row_count FROM RAW.ORDERS",
+                "SELECT COUNT(DISTINCT customer_id) AS distinct_customers, COUNT(*) AS total FROM RAW.ORDERS",
+                "SELECT COUNT(*) - COUNT(order_id) AS null_order_ids, COUNT(*) AS total FROM RAW.ORDERS",
+            ]
+        # Discover available tables in catalog
+        try:
+            tables_result = self.runner.run_job("get_data_dictionary", workspace_rel, {
+                "catalog_path": catalog_rel,
+                "summary_only": True,
+            })
+            tables = list(tables_result.get("tables", {}).keys())
+        except Exception:
+            tables = []
+
+        if not tables:
+            return ["SELECT 1 AS placeholder"]
+
+        # Generate COUNT queries for up to 3 tables
+        queries = []
+        for tbl in tables[:3]:
+            queries.append(f"SELECT COUNT(*) AS row_count FROM RAW.{tbl}")
+        return queries
 
     def _run_tenant_provisioning(self, wf: WorkflowRun, ticket: Ticket, workspace_root: str, workspace_rel: str):
         import time
@@ -492,6 +580,61 @@ Tenant is **ready**.
 # ---------------------------------------------------------------------------
 # Content renderers
 # ---------------------------------------------------------------------------
+
+def _render_requirements_md(ticket: Ticket, uploads: list, table_schemas: dict) -> str:
+    sources = json.loads(ticket.sources_json) if ticket.sources_json else []
+    metrics = json.loads(ticket.metrics_json) if ticket.metrics_json else []
+    constraints = json.loads(ticket.constraints_json) if ticket.constraints_json else []
+
+    upload_section = ""
+    if uploads:
+        upload_section = "\n## Uploaded Files\n\n"
+        for u in uploads:
+            upload_section += f"- `{u.filename}` ({u.size_bytes:,} bytes"
+            if u.mime_type:
+                upload_section += f", {u.mime_type}"
+            upload_section += ")\n"
+
+    schema_section = ""
+    if table_schemas:
+        schema_section = "\n## Inferred Schemas\n\n"
+        for tbl, cols in table_schemas.items():
+            schema_section += f"### RAW.{tbl}\n\n"
+            schema_section += "| Column | Type |\n|---|---|\n"
+            for col in cols:
+                schema_section += f"| `{col.get('name', '?')}` | {col.get('type', '?')} |\n"
+            schema_section += "\n"
+
+    sources_md = "\n".join(f"- {s}" for s in sources) if sources else "_No sources specified._"
+    metrics_md = "\n".join(f"- {m}" for m in metrics) if metrics else "_No metrics specified._"
+    constraints_md = "\n".join(f"- {c}" for c in constraints) if constraints else "_No constraints specified._"
+
+    return f"""# Requirements
+
+## Ticket
+- **ID**: `{ticket.ticket_id}`
+- **Title**: {ticket.title}
+- **Kind**: {ticket.ticket_kind}
+
+## Description
+{ticket.description or "_No description provided._"}
+
+## Sources
+{sources_md}
+
+## Grain
+{ticket.grain or "_Not specified._"}
+
+## Metrics
+{metrics_md}
+
+## Constraints
+{constraints_md}
+{upload_section}{schema_section}
+## Status
+Requirements captured. Data ingestion complete. Ready for agent processing.
+"""
+
 
 def _slugify(title: str) -> str:
     slug = title.lower()

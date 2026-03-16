@@ -348,3 +348,70 @@ No changes to `ticket_to_pr` graph, existing agent handlers, or web/ frontend.
 - [ ] `GET /workflows/{failed_run_id}` → `event_type="error"` + `severity="ERROR"` rows present.
 - [ ] `runner_job` table populated with rows for all 4 job types.
 
+---
+
+## Milestone 4: Tenant Provisioning + Resilient Workflow Engine — Status: done
+
+Notes: All 16 files implemented. Tenant CRUD + provisioning workflow, fail_workflow(), RunnerJob tracking, TenantProvisioningAgent, 4 DuckDB-backed runner handlers.
+
+---
+
+## Milestone 5: Data & Requirements Intake (DuckDB-only)
+
+Owner: Claude Code
+Status: in-progress
+
+### Scope
+
+Enable a ticket to carry structured requirements and uploaded source data (CSV/Parquet/JSON), ingest that data into a per-ticket DuckDB catalog, and feed all downstream agents (profiling, build, QA) from that catalog — entirely within DuckDB, no Snowflake calls.
+
+### New Workflow State
+
+`DATA_INGESTION` inserted before `TICKET_INTAKE`:
+```
+DATA_INGESTION → TICKET_INTAKE → DESIGN_REVIEW → PROFILING → BUILD → QA → READY_FOR_REVIEW → PR_CREATION → DONE
+```
+
+`DataIngestionAgent` runs `load_ticket_data` + `get_data_dictionary` runner jobs, writes `docs/requirements.md` + `outputs/data_dictionary.json`.
+
+### Success Criteria
+
+1. `POST /tickets` with `sources`, `grain`, `metrics`, `constraints` fields persists them on the ticket model.
+2. `POST /tickets/{id}/uploads` accepts CSV/Parquet/JSON and stores files under `uploads/`.
+3. After `DATA_INGESTION` completes, `catalog.duckdb` exists at `tenants/<tenant>/tickets/<ticket>/duckdb/catalog.duckdb`.
+4. `GET /tickets/{id}/uploads` returns uploaded files with inferred `schema_json` (populated post-ingestion).
+5. `GET /tickets/{id}/data-preview?table=X` returns ≤ 20 rows from the catalog.
+6. `docs/requirements.md` and `outputs/data_dictionary.json` artefacts are registered.
+7. `PROFILING` agent queries the ticket-level catalog (not a fresh per-run DuckDB).
+8. Ticket drawer "data" tab shows uploaded files, schemas, and inline table preview.
+9. `python -m app.scripts.dev_seed_ticket_data` exits 0, confirms catalog.duckdb + prints preview rows.
+
+### Files Touched
+
+| File | Change |
+|---|---|
+| `api/app/models/ticket.py` | Added `sources_json`, `grain`, `metrics_json`, `constraints_json` |
+| `api/app/models/uploaded_file.py` | New model |
+| `api/app/db.py` | Registered `UploadedFile` |
+| `api/app/schemas/ticket_schema.py` | Extended with requirement fields |
+| `api/app/services/workspace_manager.py` | Added `get_ticket_workspace`, `get_uploads_dir`, `get_catalog_path` |
+| `api/app/workflows/ticket_to_pr.py` | Added `DATA_INGESTION` state + `DataIngestionAgent` |
+| `api/app/routes/tickets.py` | Added upload/list/preview endpoints; ticket starts at DATA_INGESTION |
+| `api/app/services/agent_runner.py` | `_run_data_ingestion`, `_build_profiling_queries`, catalog_path in profiling |
+| `runner/app/main.py` | `load_ticket_data`, `get_data_dictionary`, `data_preview`; catalog_path in snowflake_sql |
+| `web/src/lib/api.ts` | `UploadedFile`, `DataPreviewResult` types; upload/preview functions |
+| `web/src/components/KanbanBoard.tsx` | Added `DATA_INGESTION` column |
+| `web/src/components/TicketCard.tsx` | Added `DATA_INGESTION` color |
+| `web/src/components/TicketDrawer.tsx` | Added "data" tab with schema + preview |
+| `web/src/components/CreateTicketModal.tsx` | Requirements fields + drag-drop file upload |
+| `api/app/scripts/dev_seed_ticket_data.py` | New smoke script |
+
+### Acceptance Evidence
+
+- [ ] `docker compose up --build` — all services start, `rm /workspace/factoria.db` first.
+- [ ] Create ticket via UI with 2 CSVs attached — ticket appears in `DATA_INGESTION` column.
+- [ ] Ticket moves to `TICKET_INTAKE` automatically after ingestion.
+- [ ] Ticket drawer "data" tab shows files + schemas + preview rows.
+- [ ] `outputs/data_dictionary.json` visible in artifacts tab.
+- [ ] `python -m app.scripts.dev_seed_ticket_data` exits 0, prints preview rows, confirms catalog.duckdb.
+

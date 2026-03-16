@@ -101,6 +101,12 @@ def run_job(request: RunRequest):
             record["result"] = handle_git_commit_push(request.workspace, request.args, record)
         elif request.job == "gh_create_pr":
             record["result"] = handle_gh_create_pr(request.workspace, request.args, record)
+        elif request.job == "load_ticket_data":
+            record["result"] = handle_load_ticket_data(request.workspace, request.args, record)
+        elif request.job == "get_data_dictionary":
+            record["result"] = handle_get_data_dictionary(request.workspace, request.args, record)
+        elif request.job == "data_preview":
+            record["result"] = handle_data_preview(request.workspace, request.args, record)
         elif request.job == "snowflake_provision":
             record["result"] = handle_snowflake_provision(request.workspace, request.args, record)
         elif request.job == "snowflake_seed_demo_data":
@@ -230,9 +236,15 @@ def handle_workspace_write_files(workspace: str, args: Dict[str, Any], record: D
 
 
 def handle_snowflake_sql(workspace: str, args: Dict[str, Any], record: Dict[str, Any]):
-    """Execute SQL against the workspace DuckDB database (DuckDB stands in for Snowflake)."""
+    """Execute SQL against the workspace DuckDB database (DuckDB stands in for Snowflake).
+
+    If args["catalog_path"] is provided (path relative to WORKSPACES_ROOT), that DuckDB
+    file is opened instead of the per-run db. This allows profiling queries to run
+    against the ticket-level catalog populated by load_ticket_data.
+    """
     query = args.get("query", "")
     connection = args.get("connection", "default")
+    catalog_path_rel = args.get("catalog_path")
 
     if not query:
         raise HTTPException(status_code=400, detail="query is required")
@@ -241,7 +253,15 @@ def handle_snowflake_sql(workspace: str, args: Dict[str, Any], record: Dict[str,
     record["logs"].append(f"  {query[:200]}{'...' if len(query) > 200 else ''}")
 
     target_root = resolve_workspace(workspace)
-    conn = _get_or_create_db(target_root)
+
+    if catalog_path_rel:
+        catalog_abs = (WORKSPACES_ROOT / catalog_path_rel).resolve()
+        if not str(catalog_abs).startswith(str(WORKSPACES_ROOT)):
+            raise HTTPException(status_code=400, detail="catalog_path outside root")
+        record["logs"].append(f"[duckdb] using catalog: {catalog_abs}")
+        conn = duckdb.connect(str(catalog_abs))
+    else:
+        conn = _get_or_create_db(target_root)
 
     t0 = datetime.now(timezone.utc)
     try:
@@ -524,6 +544,181 @@ def handle_gh_create_pr(workspace: str, args: Dict[str, Any], record: Dict[str, 
         "branch": branch,
         "title": title,
     }
+
+
+def _safe_stem(filename: str) -> str:
+    """Convert a filename stem to a DuckDB-safe uppercase table name."""
+    stem = Path(filename).stem.upper().replace("-", "_").replace(" ", "_")
+    # Strip non-alphanumeric/underscore chars
+    stem = re.sub(r"[^A-Z0-9_]", "_", stem)
+    if stem and stem[0].isdigit():
+        stem = f"T_{stem}"
+    return stem or "UNKNOWN"
+
+
+def _open_catalog(catalog_path_rel: str) -> duckdb.DuckDBPyConnection:
+    """Open a catalog DuckDB file by path relative to WORKSPACES_ROOT."""
+    catalog_abs = (WORKSPACES_ROOT / catalog_path_rel).resolve()
+    if not str(catalog_abs).startswith(str(WORKSPACES_ROOT)):
+        raise HTTPException(status_code=400, detail="catalog_path outside root")
+    catalog_abs.parent.mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(catalog_abs))
+    conn.execute("CREATE SCHEMA IF NOT EXISTS RAW")
+    return conn
+
+
+def handle_load_ticket_data(workspace: str, args: Dict[str, Any], record: Dict[str, Any]):
+    """Load uploaded CSV/Parquet/JSON files into the ticket-level catalog.duckdb.
+
+    Args:
+        catalog_path: path relative to WORKSPACES_ROOT for the catalog .duckdb file
+        file_paths: list of file paths relative to WORKSPACES_ROOT
+    """
+    catalog_path_rel = args.get("catalog_path", "")
+    file_paths: List[str] = args.get("file_paths", [])
+
+    if not catalog_path_rel:
+        raise HTTPException(status_code=400, detail="catalog_path is required")
+
+    conn = _open_catalog(catalog_path_rel)
+    tables_loaded: Dict[str, Any] = {}
+
+    for rel_path in file_paths:
+        abs_path = (WORKSPACES_ROOT / rel_path).resolve()
+        if not abs_path.exists():
+            record["logs"].append(f"[load] SKIP {rel_path} — not found")
+            continue
+
+        table_name = _safe_stem(abs_path.name)
+        suffix = abs_path.suffix.lower()
+        posix = abs_path.as_posix()
+
+        try:
+            if suffix == ".csv":
+                conn.execute(
+                    f"CREATE OR REPLACE TABLE RAW.{table_name} AS "
+                    f"SELECT * FROM read_csv_auto('{posix}')"
+                )
+            elif suffix == ".parquet":
+                conn.execute(
+                    f"CREATE OR REPLACE TABLE RAW.{table_name} AS "
+                    f"SELECT * FROM read_parquet('{posix}')"
+                )
+            elif suffix in (".json", ".jsonl"):
+                conn.execute(
+                    f"CREATE OR REPLACE TABLE RAW.{table_name} AS "
+                    f"SELECT * FROM read_json_auto('{posix}')"
+                )
+            else:
+                record["logs"].append(f"[load] SKIP {rel_path} — unsupported extension {suffix}")
+                continue
+
+            # Infer columns
+            cols_result = conn.execute(
+                f"SELECT column_name, data_type FROM information_schema.columns "
+                f"WHERE UPPER(table_schema)='RAW' AND UPPER(table_name)=UPPER('{table_name}')"
+            ).fetchall()
+            cols = [{"name": r[0], "type": r[1]} for r in cols_result]
+            row_count = conn.execute(f"SELECT COUNT(*) FROM RAW.{table_name}").fetchone()[0]
+
+            tables_loaded[table_name] = cols
+            record["logs"].append(f"[load] RAW.{table_name} — {row_count} rows, {len(cols)} cols from {abs_path.name}")
+        except Exception as exc:
+            record["logs"].append(f"[load] ERROR loading {abs_path.name}: {exc}")
+
+    conn.close()
+    return {"catalog_path": catalog_path_rel, "tables": tables_loaded, "files_processed": len(file_paths)}
+
+
+def handle_get_data_dictionary(workspace: str, args: Dict[str, Any], record: Dict[str, Any]):
+    """Return column stats for all RAW tables in catalog.duckdb.
+
+    Args:
+        catalog_path: path relative to WORKSPACES_ROOT
+        summary_only: if True, return table names only (no per-column stats)
+    """
+    catalog_path_rel = args.get("catalog_path", "")
+    summary_only = args.get("summary_only", False)
+
+    if not catalog_path_rel:
+        raise HTTPException(status_code=400, detail="catalog_path is required")
+
+    catalog_abs = (WORKSPACES_ROOT / catalog_path_rel).resolve()
+    if not catalog_abs.exists():
+        return {"tables": {}, "catalog_path": catalog_path_rel}
+
+    conn = duckdb.connect(str(catalog_abs), read_only=True)
+
+    tables_result = conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE UPPER(table_schema)='RAW'"
+    ).fetchall()
+    table_names = [r[0] for r in tables_result]
+
+    if summary_only:
+        conn.close()
+        return {"tables": {t: [] for t in table_names}, "catalog_path": catalog_path_rel}
+
+    tables: Dict[str, Any] = {}
+    for tbl in table_names:
+        try:
+            row_count = conn.execute(f"SELECT COUNT(*) FROM RAW.{tbl}").fetchone()[0]
+            cols_result = conn.execute(
+                f"SELECT column_name, data_type FROM information_schema.columns "
+                f"WHERE UPPER(table_schema)='RAW' AND UPPER(table_name)=UPPER('{tbl}')"
+            ).fetchall()
+            col_stats = []
+            for col_name, col_type in cols_result:
+                stat: Dict[str, Any] = {"name": col_name, "type": col_type}
+                try:
+                    null_count = conn.execute(
+                        f'SELECT COUNT(*) FROM RAW.{tbl} WHERE "{col_name}" IS NULL'
+                    ).fetchone()[0]
+                    stat["null_count"] = null_count
+                    stat["null_pct"] = round(null_count / row_count * 100, 1) if row_count else 0
+                except Exception:
+                    pass
+                col_stats.append(stat)
+            tables[tbl] = {"row_count": row_count, "columns": col_stats}
+        except Exception as exc:
+            tables[tbl] = {"error": str(exc)}
+
+    conn.close()
+    record["logs"].append(f"[data_dict] {len(tables)} tables analysed")
+    return {"tables": tables, "catalog_path": catalog_path_rel}
+
+
+def handle_data_preview(workspace: str, args: Dict[str, Any], record: Dict[str, Any]):
+    """Return up to 20 rows from a RAW table in catalog.duckdb.
+
+    The workspace arg here is the catalog path relative to WORKSPACES_ROOT
+    (the route passes catalog_rel directly as the workspace arg).
+    """
+    table_name = args.get("table_name", "")
+    limit = min(int(args.get("limit", 20)), 100)
+
+    if not table_name:
+        raise HTTPException(status_code=400, detail="table_name is required")
+
+    # workspace is the catalog path in this handler
+    catalog_abs = (WORKSPACES_ROOT / workspace).resolve()
+    if not str(catalog_abs).startswith(str(WORKSPACES_ROOT)):
+        raise HTTPException(status_code=400, detail="catalog_path outside root")
+    if not catalog_abs.exists():
+        raise HTTPException(status_code=404, detail="catalog not found — run data ingestion first")
+
+    conn = duckdb.connect(str(catalog_abs), read_only=True)
+    try:
+        safe_table = re.sub(r"[^A-Za-z0-9_]", "", table_name)
+        rel = conn.execute(f"SELECT * FROM RAW.{safe_table} LIMIT {limit}")
+        columns = [d[0] for d in rel.description]
+        rows = [dict(zip(columns, row)) for row in rel.fetchall()]
+        conn.close()
+    except Exception as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"preview failed: {exc}")
+
+    record["logs"].append(f"[preview] RAW.{table_name} — {len(rows)} rows")
+    return {"table": table_name, "columns": columns, "rows": rows}
 
 
 def handle_snowflake_provision(workspace: str, args: Dict[str, Any], record: Dict[str, Any]):

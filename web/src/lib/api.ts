@@ -1,5 +1,20 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+export interface UploadedFile {
+  file_id: string;
+  filename: string;
+  size_bytes: number;
+  mime_type: string | null;
+  schema_json: Array<{ name: string; type: string }> | null;
+  uploaded_at: string;
+}
+
+export interface DataPreviewResult {
+  table: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+}
+
 export interface EnrichedTicket {
   ticket_id: string;
   title: string;
@@ -74,8 +89,40 @@ export function createTicket(body: {
   title: string;
   description: string;
   ticket_kind: string;
+  sources?: string[];
+  grain?: string;
+  metrics?: string[];
+  constraints?: string[];
 }): Promise<{ ticket_id: string; workflow_run_id: string; state: string }> {
   return apiFetch("/tickets", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function uploadFile(
+  ticketId: string,
+  file: File
+): Promise<UploadedFile> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/tickets/${ticketId}/uploads`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Upload failed: ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+export function listUploads(ticketId: string): Promise<UploadedFile[]> {
+  return apiFetch(`/tickets/${ticketId}/uploads`);
+}
+
+export function getDataPreview(
+  ticketId: string,
+  table: string
+): Promise<DataPreviewResult> {
+  return apiFetch(`/tickets/${ticketId}/data-preview?table=${encodeURIComponent(table)}`);
 }
 
 export function getWorkflow(id: string): Promise<WorkflowRun> {

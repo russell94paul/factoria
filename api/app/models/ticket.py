@@ -21,5 +21,11 @@ class Ticket(SQLModel, table=True):
     state: str = "TICKET_INTAKE"
     last_error: Optional[str] = None
 
+    # Structured requirements (stored as JSON strings)
+    sources_json: Optional[str] = None      # list of source table/file names
+    grain: Optional[str] = None             # e.g. "one row per order per day"
+    metrics_json: Optional[str] = None      # list of metric definitions
+    constraints_json: Optional[str] = None  # list of constraint notes
+
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

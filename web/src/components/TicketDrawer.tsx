@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
-import { EnrichedTicket, WorkflowRun, Artifact, AgentSession } from "@/lib/api";
+import { EnrichedTicket, WorkflowRun, Artifact, AgentSession, UploadedFile, DataPreviewResult, listUploads, getDataPreview } from "@/lib/api";
 import ArtifactViewer from "./ArtifactViewer";
 import AgentTimeline from "./AgentTimeline";
 
 const STATE_COLORS: Record<string, string> = {
+  DATA_INGESTION: "bg-cyan-900/60 text-cyan-300",
   TICKET_INTAKE: "bg-gray-700 text-gray-200",
   DESIGN_REVIEW: "bg-yellow-900/60 text-yellow-300",
   PROFILING: "bg-blue-900/60 text-blue-300",
@@ -25,7 +26,33 @@ interface Props {
 }
 
 export default function TicketDrawer({ ticket, workflow, artifacts, sessions }: Props) {
-  const [tab, setTab] = useState<"artifacts" | "timeline">("artifacts");
+  const [tab, setTab] = useState<"artifacts" | "timeline" | "data">("artifacts");
+  const [uploads, setUploads] = useState<UploadedFile[]>([]);
+  const [preview, setPreview] = useState<DataPreviewResult | null>(null);
+  const [previewTable, setPreviewTable] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  useEffect(() => {
+    listUploads(ticket.ticket_id).then(setUploads).catch(() => {});
+  }, [ticket.ticket_id]);
+
+  async function handlePreview(tableName: string) {
+    if (previewTable === tableName) {
+      setPreview(null);
+      setPreviewTable(null);
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewTable(tableName);
+    try {
+      const result = await getDataPreview(ticket.ticket_id, tableName);
+      setPreview(result);
+    } catch {
+      setPreview(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
   const state = ticket.current_state;
   const colorClass = STATE_COLORS[state] ?? "bg-gray-700 text-gray-200";
 
@@ -67,7 +94,7 @@ export default function TicketDrawer({ ticket, workflow, artifacts, sessions }: 
           {/* Tabs */}
           <div className="border-b border-purple-900/60 mb-4">
             <nav className="flex gap-4">
-              {(["artifacts", "timeline"] as const).map((t) => (
+              {(["artifacts", "data", "timeline"] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => setTab(t)}
@@ -86,6 +113,79 @@ export default function TicketDrawer({ ticket, workflow, artifacts, sessions }: 
           {tab === "artifacts" && <ArtifactViewer artifacts={artifacts} />}
           {tab === "timeline" && (
             <AgentTimeline sessions={sessions} events={workflow?.events ?? []} />
+          )}
+          {tab === "data" && (
+            <div className="space-y-4">
+              {uploads.length === 0 ? (
+                <p className="text-sm text-purple-400 italic">No files uploaded yet.</p>
+              ) : (
+                <div className="space-y-3">
+                  {uploads.map((f) => {
+                    const tblName = f.filename.replace(/\.[^.]+$/, "").toUpperCase().replace(/[-\s]/g, "_");
+                    return (
+                      <div key={f.file_id} className="rounded border border-purple-900/40 p-3" style={{ backgroundColor: "#1B1030" }}>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-medium text-purple-100">{f.filename}</p>
+                            <p className="text-xs text-purple-500 mt-0.5">
+                              {(f.size_bytes / 1024).toFixed(1)} KB · {f.mime_type ?? "unknown"}
+                            </p>
+                          </div>
+                          {f.schema_json && (
+                            <button
+                              onClick={() => handlePreview(tblName)}
+                              className="text-xs px-2 py-1 rounded text-cyan-300 border border-cyan-800/50 hover:bg-cyan-900/30"
+                            >
+                              {previewTable === tblName ? "Hide" : "Preview"}
+                            </button>
+                          )}
+                        </div>
+                        {f.schema_json && (
+                          <div className="mt-2">
+                            <p className="text-xs text-purple-400 mb-1">Schema</p>
+                            <div className="flex flex-wrap gap-1">
+                              {f.schema_json.map((col) => (
+                                <span key={col.name} className="text-xs px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300">
+                                  {col.name}: <span className="text-purple-500">{col.type}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {previewLoading && <p className="text-sm text-purple-400">Loading preview…</p>}
+              {preview && !previewLoading && (
+                <div className="mt-3">
+                  <p className="text-xs text-purple-400 mb-2">Preview: RAW.{preview.table} ({preview.rows.length} rows)</p>
+                  <div className="overflow-x-auto">
+                    <table className="text-xs w-full border-collapse">
+                      <thead>
+                        <tr>
+                          {preview.columns.map((col) => (
+                            <th key={col} className="text-left px-2 py-1 text-purple-300 border-b border-purple-900/40 whitespace-nowrap">{col}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {preview.rows.map((row, i) => (
+                          <tr key={i} className={i % 2 === 0 ? "" : "bg-purple-900/10"}>
+                            {preview.columns.map((col) => (
+                              <td key={col} className="px-2 py-1 text-purple-200 border-b border-purple-900/20 whitespace-nowrap max-w-xs truncate">
+                                {String(row[col] ?? "")}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

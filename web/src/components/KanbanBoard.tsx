@@ -7,6 +7,7 @@ import TicketCard from "./TicketCard";
 import CreateTicketModal from "./CreateTicketModal";
 
 const COLUMNS = [
+  "DATA_INGESTION",
   "TICKET_INTAKE",
   "DESIGN_REVIEW",
   "PROFILING",
@@ -18,6 +19,7 @@ const COLUMNS = [
 ] as const;
 
 const COLUMN_LABELS: Record<string, string> = {
+  DATA_INGESTION: "Data Ingestion",
   TICKET_INTAKE: "Intake",
   DESIGN_REVIEW: "Design Review",
   PROFILING: "Profiling",

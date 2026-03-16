@@ -6,6 +6,7 @@ import { EnrichedTicket, approveGate } from "@/lib/api";
 const GATE_STATES = new Set(["DESIGN_REVIEW", "READY_FOR_REVIEW"]);
 
 const STATE_COLORS: Record<string, string> = {
+  DATA_INGESTION: "bg-cyan-900/50 text-cyan-300",
   TICKET_INTAKE: "bg-slate-700/50 text-slate-300",
   DESIGN_REVIEW: "bg-yellow-900/50 text-yellow-300",
   PROFILING: "bg-blue-900/50 text-blue-300",
