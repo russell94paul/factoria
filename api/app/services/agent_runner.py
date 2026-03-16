@@ -25,17 +25,24 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from app.models.agent_session import AgentSession
+from app.models.runner_job import RunnerJob
+from app.models.tenant import Tenant
 from app.models.ticket import Ticket
 from app.models.workflow_run import WorkflowRun
 from app.services.artifact_service import ArtifactService
 from app.services.openclaw_service import OpenClawClient
 from app.services.runner_client import RunnerClient
 from app.services.workflow_events import append_workflow_event
+from app.utils.time import utc_now
 from app.workflows.ticket_to_pr import STATE_AGENT_MAP
+from app.workflows.tenant_provisioning import STATE_AGENT_MAP as PROVISIONING_STATE_AGENT_MAP
 
 WORKSPACES_ROOT = Path(os.getenv("WORKSPACES_ROOT", "/workspace")).resolve()
 
-AGENT_STATE_MAP = {agent: state for state, agent in STATE_AGENT_MAP.items()}
+_ALL_AGENT_STATE_MAPS = [STATE_AGENT_MAP, PROVISIONING_STATE_AGENT_MAP]
+AGENT_STATE_MAP = {}
+for _m in _ALL_AGENT_STATE_MAPS:
+    AGENT_STATE_MAP.update({agent: state for state, agent in _m.items()})
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +115,20 @@ class AgentRunner:
                 self._run_qa(workflow_run, ticket, workspace_root, workspace_rel)
             elif target_state == "PR_CREATION":
                 self._run_pr(workflow_run, ticket, workspace_root, workspace_rel)
+            elif target_state == "PROVISIONING_REQUESTED":
+                self._run_tenant_provisioning(workflow_run, ticket, workspace_root, workspace_rel)
             else:
                 print(f"[runner] no handler for state {target_state}")
         except Exception as exc:
             print(f"[runner] {agent_name} failed: {exc}")
             agent_session.status = "failed"
+            agent_session.finished_at = utc_now()
             self.session.add(agent_session)
+            ticket.last_error = str(exc)[:500]
+            self.session.add(ticket)
             self.session.commit()
+            from app.services.orchestrator import Orchestrator
+            Orchestrator(self.session).fail_workflow(workflow_run, "AGENT_FAILED", str(exc)[:500])
             raise
 
         self.mark_agent_complete(agent_session)
@@ -285,6 +299,135 @@ class AgentRunner:
         pr_summary = _render_pr_summary(ticket, slug, branch, commit_sha, pr_url, pr_number, changed_files)
         written = self._write_files(workspace_rel, [{"path": "docs/pr_summary.md", "content": pr_summary}])
         self._register_and_emit(wf, written[0], "pr_summary_md", "pr_summary")
+
+    def _run_tenant_provisioning(self, wf: WorkflowRun, ticket: Ticket, workspace_root: str, workspace_rel: str):
+        import time
+
+        tenant_id = ticket.tenant_id
+        if not tenant_id:
+            raise RuntimeError("ticket has no tenant_id for provisioning")
+
+        tenant = self.session.get(Tenant, tenant_id)
+        if not tenant:
+            raise RuntimeError(f"tenant {tenant_id} not found")
+
+        tenant.status = "provisioning_running"
+        self.session.add(tenant)
+        self.session.commit()
+
+        plan_content = f"""# Tenant Provisioning Plan
+
+## Tenant
+- **Key**: `{tenant.tenant_key}`
+- **Name**: {tenant.name}
+- **Tenant ID**: `{tenant_id}`
+
+## Jobs to Run
+1. `snowflake_provision` — create DuckDB schema for tenant
+2. `snowflake_seed_demo_data` — load fixture data into tenant schema
+3. `dbt_bootstrap` — write dbt project stubs
+4. `dbt_smoke` — run smoke query to verify data
+
+## Config
+- Workspace: `{workspace_root}`
+- dbt repo: {tenant.dbt_repo_url or "_not set_"}
+"""
+        written = self._write_files(workspace_rel, [{"path": "docs/provisioning_plan.md", "content": plan_content}])
+        self._register_and_emit(wf, written[0], "provisioning_plan", "design_doc")
+
+        # Job 1: snowflake_provision (with retry; seq includes attempt to keep request_id unique)
+        job1_args = {"tenant_key": tenant.tenant_key}
+        for attempt in range(1, 4):
+            try:
+                self._run_job_tracked(wf, "snowflake_provision", workspace_rel, job1_args, seq=attempt)
+                break
+            except Exception as exc:
+                if attempt == 3:
+                    raise
+                delay = [2, 4, 8][attempt - 1]
+                append_workflow_event(
+                    self.session,
+                    workflow_run_id=wf.workflow_run_id,
+                    ticket_id=wf.ticket_id,
+                    trace_id=wf.trace_id,
+                    event_type="retry",
+                    severity="WARN",
+                    message=f"snowflake_provision attempt {attempt} failed, retrying in {delay}s: {exc}",
+                )
+                time.sleep(delay)
+
+        # Job 2: seed demo data
+        self._run_job_tracked(wf, "snowflake_seed_demo_data", workspace_rel, {"tenant_key": tenant.tenant_key}, seq=2)
+
+        # Job 3: dbt bootstrap
+        self._run_job_tracked(wf, "dbt_bootstrap", workspace_rel, {
+            "tenant_key": tenant.tenant_key,
+            "dbt_repo_url": tenant.dbt_repo_url or "",
+        }, seq=3)
+
+        # Job 4: dbt smoke
+        smoke_result = self._run_job_tracked(wf, "dbt_smoke", workspace_rel, {"tenant_key": tenant.tenant_key}, seq=4)
+
+        report_content = f"""# Tenant Provisioning Report
+
+## Tenant
+- **Key**: `{tenant.tenant_key}`
+- **Name**: {tenant.name}
+
+## Jobs Completed
+| Job | Status |
+|---|---|
+| snowflake_provision | succeeded |
+| snowflake_seed_demo_data | succeeded |
+| dbt_bootstrap | succeeded |
+| dbt_smoke | succeeded |
+
+## Smoke Result
+```json
+{json.dumps(smoke_result, indent=2)}
+```
+
+## Status
+Tenant is **ready**.
+"""
+        written2 = self._write_files(workspace_rel, [{"path": "docs/provisioning_report.md", "content": report_content}])
+        self._register_and_emit(wf, written2[0], "provisioning_report", "design_doc")
+
+        tenant.status = "ready"
+        tenant.workspace_root = workspace_root
+        self.session.add(tenant)
+        self.session.commit()
+        # mark_agent_complete is called by run_task() after this method returns
+
+    def _run_job_tracked(self, wf: WorkflowRun, job_type: str, workspace_rel: str, args: dict, seq: int = 0):
+        request_id = f"{wf.workflow_run_id}:{job_type}:{seq}"
+        job = RunnerJob(
+            workflow_run_id=wf.workflow_run_id,
+            ticket_id=wf.ticket_id,
+            request_id=request_id,
+            job_type=job_type,
+            status="running",
+            request_payload_json=json.dumps({k: v for k, v in args.items() if "secret" not in k}),
+            started_at=utc_now(),
+        )
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(job)
+        try:
+            result = self.runner.run_job(job_type, workspace_rel, args)
+            job.status = "succeeded"
+            job.result_payload_json = json.dumps(result)[:4000]
+            job.finished_at = utc_now()
+            self.session.add(job)
+            self.session.commit()
+            return result
+        except Exception as exc:
+            job.status = "failed"
+            job.error_message = str(exc)[:500]
+            job.finished_at = utc_now()
+            self.session.add(job)
+            self.session.commit()
+            raise
 
     # ------------------------------------------------------------------
     # Helpers

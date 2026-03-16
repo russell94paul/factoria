@@ -30,9 +30,16 @@ def worker_loop():
                 workflow = session.get(WorkflowRun, task.workflow_run_id)
 
                 if workflow:
-                    runner.run_task(workflow, task.agent_name)
+                    try:
+                        runner.run_task(workflow, task.agent_name)
+                        task.status = "completed"
+                    except Exception as exc:
+                        task.status = "failed"
+                        print(f"[worker] task {task.task_id} ({task.agent_name}) failed: {exc}")
+                else:
+                    task.status = "failed"
+                    print(f"[worker] workflow not found for task {task.task_id}")
 
-                task.status = "completed"
                 session.add(task)
                 session.commit()
 

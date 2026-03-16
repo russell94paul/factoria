@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import health, tickets, workflows, artifacts, sessions
+from app.routes import health, tickets, workflows, artifacts, sessions, tenants
 from app.db import create_db_and_tables
 
 app = FastAPI(
@@ -26,3 +26,4 @@ app.include_router(tickets.router)
 app.include_router(workflows.router)
 app.include_router(artifacts.router)
 app.include_router(sessions.router)
+app.include_router(tenants.router)

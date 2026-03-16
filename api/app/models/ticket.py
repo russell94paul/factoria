@@ -19,6 +19,7 @@ class Ticket(SQLModel, table=True):
     description: Optional[str] = None
 
     state: str = "TICKET_INTAKE"
+    last_error: Optional[str] = None
 
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

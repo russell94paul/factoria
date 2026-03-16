@@ -25,4 +25,6 @@ class WorkflowEvent(SQLModel, table=True):
 
     trace_id: str | None = None
 
+    severity: str = "INFO"          # INFO | WARN | ERROR
+
     created_at: datetime = Field(default_factory=utc_now)
