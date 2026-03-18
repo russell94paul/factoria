@@ -359,7 +359,7 @@ Notes: All 16 files implemented. Tenant CRUD + provisioning workflow, fail_workf
 ## Milestone 5: Data & Requirements Intake (DuckDB-only)
 
 Owner: Claude Code
-Status: in-progress
+Status: done
 
 ### Scope
 
@@ -414,4 +414,52 @@ DATA_INGESTION → TICKET_INTAKE → DESIGN_REVIEW → PROFILING → BUILD → Q
 - [ ] Ticket drawer "data" tab shows files + schemas + preview rows.
 - [ ] `outputs/data_dictionary.json` visible in artifacts tab.
 - [ ] `python -m app.scripts.dev_seed_ticket_data` exits 0, prints preview rows, confirms catalog.duckdb.
+
+---
+
+## M6 — Demo Prep
+
+**Status:** done
+
+**Scope:** Reusable demo dataset bundle, manual demo runbook, seed script quality-of-life improvements.
+
+**Dataset note:** The initial dataset used pre-modeled `dim_*/fact_*` CSVs. These were replaced with five **RAW source tables** (`raw_customers`, `raw_campaign_spend`, `raw_orders`, `raw_order_items`, `raw_web_sessions`) so the demo mirrors the real workflow: operator uploads un-modeled data, agents derive the star schema. The RAW tables include intentional quirks (duplicate customer emails, nullable join keys, daily-grain spend) that the DesignAgent should surface and handle.
+
+### Deliverables
+
+1. `demo_data/raw_marketing_data/` — 5 RAW CSVs (~744 rows total) + `README.md` with schema docs, quirks, derived-model targets, and suggested demo ticket JSON.
+2. `scripts/prepare_demo_zip.py` — packages CSVs into `dist/raw_marketing_data.zip` (stdlib only).
+3. `docs/manual_demo.md` — full step-by-step runbook: stack startup → ticket creation (UI + API) → gate approval → artefact inspection → demo reset; calls out derived models and talking points per stage.
+4. `dev_seed_tenant.py` + `dev_seed_ticket_data.py` — `AUTO_APPROVE_GATES` env var (default `true`); `--skip-ticket` flag.
+5. `dist/` added to `.gitignore`.
+
+### Verification Commands
+
+```bash
+# Package RAW CSVs into a zip for hand-off
+python scripts/prepare_demo_zip.py
+# -> dist/raw_marketing_data.zip  (~12 KB, 5 RAW CSVs + README)
+
+# Provision tenant only — no ticket workflow
+cd api && AUTO_APPROVE_GATES=false python -m app.scripts.dev_seed_tenant --skip-ticket
+
+# Create ticket + upload files, stop before polling (manual gate flow)
+cd api && AUTO_APPROVE_GATES=false python -m app.scripts.dev_seed_ticket_data --skip-ticket
+```
+
+See `docs/manual_demo.md` for the full step-by-step demo runbook.
+
+### Files Touched
+
+| File | Change |
+|---|---|
+| `demo_data/raw_marketing_data/` | Renamed from `marketing_star_schema/`; 5 RAW source CSVs + updated README |
+| `scripts/prepare_demo_zip.py` | Updated path/zip name to `raw_marketing_data` |
+| `docs/manual_demo.md` | Updated for RAW upload flow and new bundle name |
+| `runner/app/main.py` | `handle_load_ticket_data` strips `raw_` prefix: `raw_orders.csv` → `raw.ORDERS` |
+| `api/app/services/agent_runner.py` | Stem matching updated to strip `RAW_` prefix; writes `outputs/raw_tables.json` |
+| `web/src/components/CreateTicketModal.tsx` | Data viewer: collapsible per-file panels with schema + 20-row preview |
+| `api/app/scripts/dev_seed_tenant.py` | `AUTO_APPROVE_GATES` env var + `--skip-ticket` flag |
+| `api/app/scripts/dev_seed_ticket_data.py` | Same; unicode `->` fix for Windows |
+| `.gitignore` | Added `dist/` |
 

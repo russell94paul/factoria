@@ -589,7 +589,9 @@ def handle_load_ticket_data(workspace: str, args: Dict[str, Any], record: Dict[s
             record["logs"].append(f"[load] SKIP {rel_path} — not found")
             continue
 
-        table_name = _safe_stem(abs_path.name)
+        stem = _safe_stem(abs_path.name)
+        # Strip leading RAW_ prefix so raw_orders.csv → raw.ORDERS (not raw.RAW_ORDERS)
+        table_name = stem[4:] if stem.startswith("RAW_") else stem
         suffix = abs_path.suffix.lower()
         posix = abs_path.as_posix()
 
@@ -622,7 +624,7 @@ def handle_load_ticket_data(workspace: str, args: Dict[str, Any], record: Dict[s
             row_count = conn.execute(f"SELECT COUNT(*) FROM RAW.{table_name}").fetchone()[0]
 
             tables_loaded[table_name] = cols
-            record["logs"].append(f"[load] RAW.{table_name} — {row_count} rows, {len(cols)} cols from {abs_path.name}")
+            record["logs"].append(f"[load] raw.{table_name.lower()} — {row_count} rows, {len(cols)} cols from {abs_path.name}")
         except Exception as exc:
             record["logs"].append(f"[load] ERROR loading {abs_path.name}: {exc}")
 
