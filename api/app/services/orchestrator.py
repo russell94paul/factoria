@@ -1,13 +1,22 @@
+import json
+
 from sqlmodel import Session, select
 
 from app.models.workflow_run import WorkflowRun
 from app.models.gate_approval import GateApproval
 from app.services.workflow_events import append_workflow_event
 from app.services.agent_queue import AgentQueue
-from app.workflows.ticket_to_pr import WORKFLOW_GRAPH, STATE_AGENT_MAP
 from app.utils.time import utc_now
 
 GATED_STATES = {"DESIGN_REVIEW", "READY_FOR_REVIEW"}
+
+
+def _get_graphs(workflow_name: str):
+    if workflow_name == "tenant_provisioning":
+        from app.workflows.tenant_provisioning import WORKFLOW_GRAPH, STATE_AGENT_MAP
+    else:
+        from app.workflows.ticket_to_pr import WORKFLOW_GRAPH, STATE_AGENT_MAP
+    return WORKFLOW_GRAPH, STATE_AGENT_MAP
 
 
 class Orchestrator:
@@ -22,7 +31,8 @@ class Orchestrator:
         if self._gate_is_pending(workflow):
             return workflow
 
-        next_state = WORKFLOW_GRAPH.get(workflow.current_state)
+        workflow_graph, _ = _get_graphs(workflow.workflow_name)
+        next_state = workflow_graph.get(workflow.current_state)
 
         if not next_state:
             return workflow
@@ -35,6 +45,8 @@ class Orchestrator:
     def transition(self, workflow: WorkflowRun, new_state: str):
         old_state = workflow.current_state
         workflow.current_state = new_state
+
+        _, state_agent_map = _get_graphs(workflow.workflow_name)
 
         append_workflow_event(
             self.session,
@@ -49,7 +61,7 @@ class Orchestrator:
         self.session.add(workflow)
         self.session.commit()
 
-        agent_name = STATE_AGENT_MAP.get(new_state)
+        agent_name = state_agent_map.get(new_state)
 
         if agent_name:
             queue = AgentQueue(self.session)
@@ -66,6 +78,24 @@ class Orchestrator:
         self.session.commit()
 
         return workflow
+
+    def fail_workflow(self, workflow: WorkflowRun, error_code: str, message: str):
+        workflow.status = "failed"
+        workflow.finished_at = utc_now()
+        workflow.last_error = message[:500]
+        workflow.error_code = error_code
+        self.session.add(workflow)
+        self.session.commit()
+        append_workflow_event(
+            self.session,
+            workflow_run_id=workflow.workflow_run_id,
+            ticket_id=workflow.ticket_id,
+            trace_id=workflow.trace_id,
+            event_type="error",
+            severity="ERROR",
+            message=message,
+            payload_json=json.dumps({"error_code": error_code, "retryable": True}),
+        )
 
     def _gate_is_pending(self, workflow: WorkflowRun) -> bool:
         if workflow.current_state not in GATED_STATES:

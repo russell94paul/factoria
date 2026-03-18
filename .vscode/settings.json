@@ -1,0 +1,11 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "name": "test_001",
+            "database": "${workspaceFolder:factoria}/workspace/tenants/default/tickets/30880cfc-3252-4344-a6f4-6f76f7601785/duckdb/catalog.duckdb"
+        }
+    ],
+    "sqltools.useNodeRuntime": true
+}

@@ -24,3 +24,6 @@ class WorkflowRun(SQLModel, table=True):
 
     
     workspace_root: str | None = None
+    tenant_id: str | None = None
+    last_error: str | None = None
+    error_code: str | None = None   # AGENT_FAILED | RUNNER_ERROR | TIMEOUT

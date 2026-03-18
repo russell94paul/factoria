@@ -24,3 +24,8 @@ Thumbs.db
 # Workspace - where tenants live
 workspace/*
 !workspace/.gitkeep
+# Generated demo zip archives
+dist/
+
+# Files
+*.csv

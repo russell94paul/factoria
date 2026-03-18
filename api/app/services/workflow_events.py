@@ -14,6 +14,7 @@ def append_workflow_event(
     actor_id: str = "orchestrator",
     message: str | None = None,
     payload_json: str | None = None,
+    severity: str = "INFO",
 ) -> WorkflowEvent:
     # compute next seq for this workflow_run_id
     last = session.exec(
@@ -37,6 +38,7 @@ def append_workflow_event(
         actor_id=actor_id,
         message=message,
         payload_json=payload_json,
+        severity=severity,
     )
 
     session.add(event)
